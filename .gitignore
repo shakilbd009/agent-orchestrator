@@ -1,0 +1,41 @@
+# OS
+.DS_Store
+*.swp
+*.swo
+*~
+
+# Editor
+.vscode/
+.idea/
+*.iml
+
+# Build artifacts
+backend/tmp/
+frontend/tmp/
+frontend/.svelte-kit/
+
+# Dependency caches
+backend/vendor/
+frontend/node_modules/
+
+# Environment secrets (never commit)
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Test coverage
+coverage/
+
+# Docker volumes
+*.vol
+
+# Keep empty directories
+backend/
+frontend/
+!backend/.gitkeep
+!frontend/.gitkeep

@@ -1,0 +1,91 @@
+# =============================================================================
+# Agent Orchestrator Platform — Phase 0 Docker Compose
+# =============================================================================
+# Phase 0: Infrastructure services only.
+# backend/ and frontend/ are empty — no build contexts.
+# Phase 1 (App Shell) will wire these services into the app.
+#
+# Usage:
+#   docker-compose up -d          # start services
+#   docker-compose down          # stop services (volumes preserved)
+#   docker-compose down -v        # stop and destroy volumes
+#   docker-compose ps            # service status
+#   docker-compose logs [svc]    # view logs
+# =============================================================================
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: agent-orchestrator-backend
+    restart: unless-stopped
+    ports:
+      - "3001:3001"
+    networks:
+      - agent-orchestrator-net
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: agent-orchestrator-frontend
+    restart: unless-stopped
+    ports:
+      - "5173:5173"
+    environment:
+      - VITE_API_BASE_URL=http://localhost:3001
+    depends_on:
+      - backend
+    networks:
+      - agent-orchestrator-net
+
+  database:
+    image: postgres:17-alpine
+    container_name: agent-orchestrator-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DATABASE_DB:-agent_orchestrator}
+      POSTGRES_USER: ${DATABASE_USER:-appuser}
+      POSTGRES_PASSWORD: ${DATABASE_PASSWORD:-changeme}
+    volumes:
+      - database_data:/var/lib/postgresql/data
+    ports:
+      - "${DATABASE_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${DATABASE_USER:-appuser}", "-d", "${DATABASE_DB:-agent_orchestrator}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - agent-orchestrator-net
+
+  cache:
+    image: redis:7-alpine
+    container_name: agent-orchestrator-cache
+    restart: unless-stopped
+    command: redis-server --requirepass ${CACHE_PASSWORD:-changeme} --appendonly yes
+    volumes:
+      - cache_data:/data
+    ports:
+      - "${CACHE_PORT:-6380}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - agent-orchestrator-net
+
+volumes:
+  database_data:
+    name: agent-orchestrator-database-data
+  cache_data:
+    name: agent-orchestrator-cache-data
+
+networks:
+  agent-orchestrator-net:
+    name: agent-orchestrator-net
+    driver: bridge

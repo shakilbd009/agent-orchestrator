@@ -1,0 +1,464 @@
+openapi: 3.1.0
+info:
+  title: Agent Orchestrator Platform — API Contract
+  description: |
+    Phase 0 placeholder contract.
+    All product endpoints are reserved until their respective BRDs are authored.
+    This document defines the API metadata structure, common schema placeholders,
+    and the Layer A / Layer B separation contract.
+  version: 0.1.0-placeholder
+
+servers:
+  - url: https://api.agentorchestrator.example.com/v1
+    description: Placeholder server — BRD-01 defines actual deployment target
+
+security:
+  - BearerAuth: []
+
+tags:
+  - name: Layer A — Orchestrator
+    description: |
+      Layer A agents (architect, pm) own decomposition, routing, pipeline gates,
+      and task handoff contracts. Layer A endpoints govern process, not business logic.
+  - name: Layer B — Specialist
+    description: |
+      Layer B agents (developer, reviewer, qa, devops) own implementation,
+      validation, and quality gate delivery. Layer B endpoints are scoped to
+      assigned task execution.
+  - name: Platform — Metadata
+    description: |
+      Platform-level metadata endpoints: health, status, agent registry,
+      and feature flags. These do not contain product business logic.
+
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      summary: Platform health check
+      description: Returns platform operational status. No auth required.
+      tags: [Platform — Metadata]
+      security: []
+      responses:
+        '200':
+          description: Platform is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HealthResponse'
+
+  /status:
+    get:
+      operationId: getStatus
+      summary: Platform status with active phase and gate state
+      description: |
+        Returns current platform phase, active gates, and governance state.
+        Used by dashboards and human approval UIs.
+      tags: [Platform — Metadata]
+      responses:
+        '200':
+          description: Status retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlatformStatus'
+
+  /tasks:
+    post:
+      operationId: createTask
+      summary: Layer A — Create and decompose a task
+      description: |
+        Layer A agents (architect, pm) create tasks and attach child-task
+        dependency graphs. This is the entry point for all work decomposition.
+        Layer B agents must NOT call this endpoint directly.
+      tags: [Layer A — Orchestrator]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskCreateRequest'
+      responses:
+        '201':
+          description: Task created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '403':
+          description: Caller is not a Layer A agent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /tasks/{taskId}:
+    parameters:
+      - $ref: '#/components/parameters/TaskId'
+    get:
+      operationId: getTask
+      summary: Retrieve task details and current state
+      tags: [Layer A — Orchestrator, Layer B — Specialist]
+      responses:
+        '200':
+          description: Task retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /tasks/{taskId}/promote:
+    post:
+      operationId: promoteTask
+      summary: Layer A — Promote task to next pipeline gate
+      description: |
+        Advances a task to its next defined gate. Layer B agents may not
+        promote tasks past their quality gate. Human approval is required
+        at configured gate boundaries.
+      tags: [Layer A — Orchestrator]
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      responses:
+        '200':
+          description: Task promoted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '403':
+          description: Promotion not authorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /tasks/{taskId}/complete:
+    post:
+      operationId: completeTask
+      summary: Layer B — Mark task as done and signal gate handoff
+      description: |
+        Layer B agents mark their task as done. This does NOT automatically
+        close the quality gate — the gate remains open until Layer A or a
+        human approves the handoff.
+      tags: [Layer B — Specialist]
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskCompleteRequest'
+      responses:
+        '200':
+          description: Task marked complete; gate handoff initiated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+        '403':
+          description: Caller is not the assigned Layer B agent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /tasks/{taskId}/block:
+    post:
+      operationId: blockTask
+      summary: Request human input to proceed
+      description: |
+        Transitions task to blocked state. A blocked task halts pipeline
+        advancement until the blocker is resolved by a human.
+      tags: [Layer A — Orchestrator, Layer B — Specialist]
+      parameters:
+        - $ref: '#/components/parameters/TaskId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BlockRequest'
+      responses:
+        '200':
+          description: Task blocked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Task'
+
+  /agents:
+    get:
+      operationId: listAgents
+      summary: Platform agent registry
+      description: |
+        Returns all registered agent profiles and their current operational status.
+        Layer A agents are always listed; Layer B agents are included when active.
+      tags: [Platform — Metadata]
+      responses:
+        '200':
+          description: Agent registry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentRegistry'
+
+components:
+  parameters:
+    TaskId:
+      name: taskId
+      in: path
+      required: true
+      description: Kanban task identifier
+      schema:
+        type: string
+        example: t_07d63a0f
+
+  schemas:
+    # --- Metadata / Platform Schemas ---
+
+    HealthResponse:
+      type: object
+      required: [status, timestamp]
+      properties:
+        status:
+          type: string
+          enum: [healthy, degraded, maintenance]
+        timestamp:
+          type: string
+          format: date-time
+
+    PlatformStatus:
+      type: object
+      required: [phase, gates, timestamp]
+      properties:
+        phase:
+          type: string
+          enum: [phase-0, phase-1, phase-2]
+          description: Current governance phase
+        gates:
+          type: array
+          items:
+            $ref: '#/components/schemas/GateStatus'
+        featureFlags:
+          type: object
+          additionalProperties:
+            type: boolean
+          description: Feature flag states from feature-flags.md
+        timestamp:
+          type: string
+          format: date-time
+
+    GateStatus:
+      type: object
+      required: [gateId, name, state]
+      properties:
+        gateId:
+          type: string
+          example: G0
+        name:
+          type: string
+          example: Foundation & Governance
+        state:
+          type: string
+          enum: [open, passed, blocked]
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          example: FORBIDDEN
+        message:
+          type: string
+          example: Caller is not authorized to perform this operation
+
+    # --- Task Schemas (placeholder — full shape defined in BRD-02) ---
+
+    TaskCreateRequest:
+      type: object
+      required: [title, assignee, layer]
+      properties:
+        title:
+          type: string
+          description: Short task title
+          example: Implement rate limiter
+        body:
+          type: string
+          description: Full task specification
+        assignee:
+          type: string
+          description: Agent profile name
+          example: developer
+        layer:
+          type: string
+          enum: [A, B]
+          description: Layer A (orchestrator) or Layer B (specialist)
+        parents:
+          type: array
+          items:
+            type: string
+          description: Parent task IDs for dependency edges
+        priority:
+          type: integer
+          description: Higher = picked sooner
+        workspaceKind:
+          type: string
+          enum: [scratch, dir, worktree]
+        tags:
+          type: array
+          items:
+            type: string
+
+    TaskCompleteRequest:
+      type: object
+      required: [taskId]
+      properties:
+        taskId:
+          type: string
+        summary:
+          type: string
+          description: Human-readable handoff summary
+        metadata:
+          type: object
+          additionalProperties: true
+          description: Structured facts about this execution
+
+    BlockRequest:
+      type: object
+      required: [taskId, reason]
+      properties:
+        taskId:
+          type: string
+        reason:
+          type: string
+          description: One-sentence summary of what is needed
+
+    Task:
+      type: object
+      required: [id, title, status, layer, createdAt]
+      properties:
+        id:
+          type: string
+          example: t_07d63a0f
+        title:
+          type: string
+        body:
+          type: string
+        status:
+          type: string
+          enum: [todo, in_progress, done, blocked, cancelled]
+        layer:
+          type: string
+          enum: [A, B]
+        assignee:
+          type: string
+        parents:
+          type: array
+          items:
+            type: string
+        children:
+          type: array
+          items:
+            type: string
+        priority:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+          nullable: true
+        blockedReason:
+          type: string
+          nullable: true
+        metadata:
+          type: object
+          additionalProperties: true
+
+    AgentRegistry:
+      type: object
+      required: [agents]
+      properties:
+        agents:
+          type: array
+          items:
+            $ref: '#/components/schemas/AgentProfile'
+        timestamp:
+          type: string
+          format: date-time
+
+    AgentProfile:
+      type: object
+      required: [name, layer, status]
+      properties:
+        name:
+          type: string
+          example: architect
+        layer:
+          type: string
+          enum: [A, B]
+        status:
+          type: string
+          enum: [active, idle, blocked]
+        currentTaskId:
+          type: string
+          nullable: true
+        skills:
+          type: array
+          items:
+            type: string
+
+  responses:
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        JWT issued by the platform auth layer.
+        Layer A agents receive tokens with A-tier claims.
+        Layer B agents receive tokens scoped to their assigned task.
+
+# ----------------------------------------------------------------------
+# PHASE 0 CONTRACT NOTES
+# ----------------------------------------------------------------------
+#
+# This OpenAPI contract is a PLACEHOLDER.  The following are NOT defined
+# and are BLOCKED on their respective BRDs:
+#
+#   BRD-01 (App Shell)         → actual server URL, auth integration, CORS
+#   BRD-02 (Orchestration)     → /tasks dependency graph, gate promotion rules
+#   BRD-03 (Dashboard)         → dashboard read API endpoints
+#   BRD-04 (Agent Dashboard)   → agent-facing task APIs
+#   BRD-05 (LLM Provider)     → LLM inference endpoints
+#   BRD-06 (Agent Memory)      → memory store read/write endpoints
+#   BRD-07 (BRD Authoring)     → BRD create/update API
+#   BRD-08 to BRD-21          → domain-specific endpoints
+#
+# Do NOT add path items for any of the above without their BRD first.
+#
+# Layer A vs Layer B enforcement:
+#   - Layer A endpoints (decompose, promote, gate-approve) reject Layer B tokens
+#   - Layer B endpoints (complete, deliver) are scoped to the caller's task
+#   - This separation is contractual, enforced by the auth layer
+#
+# Feature flag key reference (from specs/feature-flags.md):
+#   kanban-orchestrator   → enables /tasks endpoints
+#   layer-a-agents        → enables Layer A agent operations
+#   layer-b-agents        → enables Layer B agent operations
+#   human-gates           → enables gate checkpoint enforcement
+#

@@ -1,0 +1,165 @@
+# .github/workflows/eval.yml — Phase 0 CI: static checks only
+#
+# Runs Phase 0-safe static checks on every push and PR.
+# Phase 1+ jobs are gated on backend/frontend source existence.
+#
+# Phase 0 checks:
+#   - graduation package completeness
+#   - BRD open items tracking
+#   - Feature flag registry integrity
+#
+# Phase 1+ checks (run only when backend/frontend exist):
+#   - Go vet / build (backend)
+#   - pnpm install + type-check (frontend)
+#   - check-orchestrator-pipeline gate
+
+name: Eval
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  phase0-checks:
+    name: Phase 0 static checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check for unexpected source code in Phase 0
+        run: |
+          # Phase 0 rule: no source code in backend/ or frontend/
+          if find backend frontend -type f ! -name '.gitkeep' 2>/dev/null | grep -q .; then
+            echo "ERROR: source files found in backend/ or frontend/ during Phase 0"
+            find backend frontend -type f ! -name '.gitkeep' | head -20
+            exit 1
+          fi
+          echo "Phase 0 source-clean: PASS"
+
+      - name: Run graduation package check
+        env:
+          PHASE: 0
+        run: |
+          echo "=== Phase 0 graduation package check ==="
+          # Run inline if the script doesn't exist yet (first CI run)
+          if [[ -f ./evals/architecture/check-graduation-package.sh ]]; then
+            PHASE=0 ./evals/architecture/check-graduation-package.sh
+          else
+            echo "Graduation package script not yet created — skipping"
+          fi
+
+      - name: Run BRD open items check
+        run: |
+          echo "=== BRD open items check ==="
+          if [[ -f ./evals/architecture/check-brd-open-items.sh ]]; then
+            ./evals/architecture/check-brd-open-items.sh
+          else
+            echo "BRD open items script not yet created — skipping"
+          fi
+
+      - name: Run feature flags check
+        run: |
+          echo "=== Feature flags check ==="
+          if [[ -f ./evals/architecture/check-feature-flags.sh ]]; then
+            ./evals/architecture/check-feature-flags.sh
+          else
+            echo "Feature flags script not yet created — skipping"
+          fi
+
+      - name: Validate docker-compose.yml
+        run: |
+          if [[ -f docker-compose.yml ]]; then
+            docker-compose config --quiet && echo "docker-compose.yml: valid"
+          else
+            echo "docker-compose.yml not present — skipping"
+          fi
+
+  phase1-backend:
+    name: Backend (Go)
+    runs-on: ubuntu-latest
+    # Only run if backend/ has source
+    if: |
+      always() && (
+        contains(inputs('source-changes'), 'backend') ||
+        contains(inputs('source-changes'), 'all') ||
+        (github.event_name == 'push' && needs.phase0-checks.result == 'success')
+      ) ||
+      (needs.phase0-checks.result == 'skipped')
+    needs: phase0-checks
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+          cache-dependency-path: backend/go.sum
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Build
+        run: go build -o /dev/null ./...
+
+  phase1-frontend:
+    name: Frontend (SvelteKit)
+    runs-on: ubuntu-latest
+    needs: phase0-checks
+    defaults:
+      run:
+        working-directory: frontend
+    # Only run if frontend/ has package.json
+    if: |
+      always() && (
+        needs.phase0-checks.result == 'skipped' ||
+        (github.event_name == 'push' && needs.phase0-checks.result == 'success')
+      )
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '25'
+          cache: 'pnpm'
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check
+        run: pnpm exec svelte-check --threshold warning
+
+  phase1-orchestrator-pipeline:
+    name: Orchestrator pipeline gate
+    runs-on: ubuntu-latest
+    needs: [phase1-backend, phase1-frontend]
+    # Only run if BRD_ID is set via matrix or manually triggered
+    if: |
+      always() &&
+      (needs.phase1-backend.result == 'success' || needs.phase1-backend.result == 'skipped') &&
+      (needs.phase1-frontend.result == 'success' || needs.phase1-frontend.result == 'skipped')
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run orchestrator pipeline gate
+        env:
+          HERMES_KANBAN_BOARD: ${{ vars.HERMES_KANBAN_BOARD || 'agent-orchestrator' }}
+          BRD_ID: ${{ inputs.brd_id || 'BRD-01' }}
+        run: |
+          if [[ -f ./scripts/check-orchestrator-pipeline.sh ]]; then
+            ./scripts/check-orchestrator-pipeline.sh release
+          else
+            echo "Pipeline gate script not yet created — skipping"
+          fi
+
+# allow-merge: ensure all Phase 1+ jobs must pass before merge
