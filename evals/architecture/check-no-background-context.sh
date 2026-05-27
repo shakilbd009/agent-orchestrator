@@ -52,13 +52,13 @@ while IFS= read -r -d '' file; do
     # Strategy: for each function definition in the file, collect its body lines
     # and check if any implicit context access occurs outside an ARCH_OK line.
 
-    local linenum=0
-    local in_function=0
-    local func_name=""
-    local func_body_lines=""
+    linenum=0
+    in_function=0
+    func_name=""
+    func_body_lines=""
 
     while IFS= read -r line; do
-        linenum=$((linenum + 1))
+        ((linenum++)) || true
 
         # Detect function definitions in various languages
         # Go: func name(

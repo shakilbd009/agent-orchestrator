@@ -32,7 +32,7 @@ while IFS= read -r -d '' file; do
     fi
 
     # Find lines containing panic( that are not on the same line as ARCH_OK
-    grep -nE 'panic\s*\(' "$file" 2>/dev/null | \
+    grep -nE 'panic\s*\(' "$file" 2>/dev/null || true | \
     while IFS= read -r line; do
         linenum=$(echo "$line" | cut -d: -f1)
         content=$(echo "$line" | cut -d: -f2-)
