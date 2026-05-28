@@ -1,7 +1,7 @@
 # STATUS.md — Agent Orchestrator Platform
 
 **Project:** agent-orchestrator  
-**Last Updated:** Phase 0 batch 2 (governance artifacts)  
+**Last Updated:** 2026-05-28 — BRD-02 approved for curation  
 **Governance Phase:** 0 — Foundation & Governance  
 
 ---
@@ -43,6 +43,14 @@
 | Phase 0 batch 1: scaffold + env | `ops` | Done |
 | Phase 0 batch 2: governance artifacts | `architect` | In Progress |
 | Phase 0 batch 3: kanban board setup | `pm` | Pending |
+
+---
+
+## Backlog
+
+| BRD | Title | Status | Artifact |
+|---|---|---|---|
+| BRD-02 | Platform-Native Orchestration Pipeline | In Curation | `specs/orchestration/brd-02-platform-native-orchestration-pipeline.md` |
 
 ---
 

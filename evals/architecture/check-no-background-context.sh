@@ -29,72 +29,134 @@ if [[ ${#SRC_DIRS[@]} -eq 0 ]]; then
     exit 0
 fi
 
-# Known implicit context/session accessor patterns to flag
-# These are heuristics: in Phase 1 these will be refined via static analysis.
-IMPLICIT_PATTERNS='("session_get|get_context|ctx\.get\(|global_session|session\[|get_session\()'
+# Skip these directory names entirely (generated / vendored / node_modules)
+SKIP_DIRS=(
+    "node_modules"
+    ".pnpm"
+    ".svelte-kit"
+    "vendor"
+    "__pycache__"
+    ".next"
+    "dist"
+    "build"
+)
 
-# For each source file, look for patterns that suggest implicit context capture
-# in what looks like a skill handler or task handler function.
-while IFS= read -r -d '' file; do
-    # Skip vendor, generated, node_modules
-    if [[ "$file" == *"/vendor/"* ]] || \
-       [[ "$file" == *"node_modules/"* ]] || \
-       [[ "$file" == *".pb.go"* ]] || \
-       [[ "$file" == *"*.graphql.js"* ]]; then
+# Build find -not -path predicates to skip large generated/vendor directories.
+# Original script processed 1502 files including node_modules/.pnpm/.svelte-kit.
+# Using -not -path "*/dir/*" instead of -path dir -prune -o keeps the logic simple
+# and correct on both GNU and macOS BSD find.
+PRUNE_ARGS=()
+for d in "${SKIP_DIRS[@]}"; do
+    PRUNE_ARGS+=( -not -path "*/${d}/*" )
+done
+
+# Known implicit context/session accessor patterns to flag
+IMPLICIT_PATTERNS='session_get|get_context|ctx\.get\(|global_session|session\[|get_session\('
+
+# Function boundary patterns for various languages
+FUNC_PATTERNS='^(func |^(export )?async def |^(export )?function [[:alnum:]_]+\(|^const [[:alnum:]_]+ = (async )?\(|^export (async )?function |^[[:alnum:]_]+[[:space:]]*\(\)|^function [[:alnum:]_]+'
+
+# ARCH_OK marker to suppress false positives
+ARCH_OK_LINE='// ARCH_OK|# ARCH_OK|ARCH_OK'
+
+# Step 1 — batch discovery: find files containing implicit context patterns.
+# This is O(N) with fast binary grep, not O(N * lines_per_file).
+# Files in skip directories are excluded by find prune.
+CANDIDATE_TMP=$(mktemp)
+find "${SRC_DIRS[@]}" -type f \
+    \( -name '*.go' -o -name '*.py' -o -name '*.ts' -o -name '*.tsx' -o -name '*.js' -o -name '*.sh' \) \
+    "${PRUNE_ARGS[@]}" \
+    -print 2>/dev/null | \
+xargs grep -lE "$IMPLICIT_PATTERNS" 2>/dev/null || true > "$CANDIDATE_TMP"
+
+CANDIDATE_COUNT=0
+while IFS= read -r line; do
+    ((CANDIDATE_COUNT++)) || true
+done < "$CANDIDATE_TMP"
+
+if [[ $CANDIDATE_COUNT -eq 0 ]]; then
+    echo "check-no-background-context: PASS — no implicit context capture detected"
+    rm -f "$CANDIDATE_TMP"
+    exit 0
+fi
+
+echo "check-no-background-context: scanning $CANDIDATE_COUNT candidate files..."
+
+# Step 2 — per-candidate function-body analysis
+while IFS= read -r file; do
+    # Skip already-handled generated file types
+    if [[ "$file" == *.pb.go ]] || [[ "$file" == *.graphql.js ]]; then
         continue
     fi
 
-    # We scan for function definitions that contain implicit context reads
-    # This is a heuristic check: it flags functions that contain both a
-    # function definition keyword and one of the implicit context patterns,
-    # without the pattern being on a parameter line.
-    #
-    # Strategy: for each function definition in the file, collect its body lines
-    # and check if any implicit context access occurs outside an ARCH_OK line.
+    # Get all implicit-pattern match line numbers (filter ARCH_OK)
+    IMPLICIT_LINES=$(grep -nE "$IMPLICIT_PATTERNS" "$file" 2>/dev/null || true)
+    # Remove ARCH_OK lines
+    IMPLICIT_LINES=$(echo "$IMPLICIT_LINES" | grep -vE "$ARCH_OK_LINE" || true)
 
-    linenum=0
-    in_function=0
-    func_name=""
-    func_body_lines=""
+    if [[ -z "$IMPLICIT_LINES" ]]; then
+        continue
+    fi
 
-    while IFS= read -r line; do
-        ((linenum++)) || true
+    # Get all function-start line numbers
+    FUNC_LINES=$(grep -nE "$FUNC_PATTERNS" "$file" 2>/dev/null || true)
 
-        # Detect function definitions in various languages
-        # Go: func name(
-        # Python: def name(
-        # TypeScript/JS: function name( or const name = ( or async name(
-        # Shell: name() {  or  function name {
-        if echo "$line" | grep -qoE '^(func |^(export )?async def |^(export )?function [[:alnum:]_]+\(|^const [[:alnum:]_]+ = (async )?\(|^export (async )?function |^[[:alnum:]_]+[[:space:]]*\(\)|^function [[:alnum:]_]+)'; then
-            # Start of a new function — reset state
-            in_function=1
-            func_name="$line"
-            func_body_lines=""
-            continue
-        fi
-
-        # End of function: blank line or line not indented (top-level)
-        if [[ $in_function -eq 1 ]]; then
-            # If this line is not indented and not empty and not a closing brace, we exited the function
-            if echo "$line" | grep -qoE '^[^[:space:]]'; then
-                in_function=0
-            else
-                func_body_lines="${func_body_lines}${line}"$'\n'
-            fi
-        fi
-
-        # Now check this line for implicit context patterns
-        if echo "$line" | grep -qoE "$IMPLICIT_PATTERNS"; then
-            # Skip ARCH_OK lines
-            if echo "$line" | grep -qoE '// ARCH_OK|# ARCH_OK|ARCH_OK'; then
-                continue
-            fi
-
+    if [[ -z "$FUNC_LINES" ]]; then
+        # No function detected; any remaining implicit lines are violations
+        while IFS= read -r impl_line; do
+            [[ -z "$impl_line" ]] && continue
+            linenum=$(echo "$impl_line" | cut -d: -f1)
             warn "$file" "$linenum"
-        fi
-    done < "$file"
+        done <<< "$IMPLICIT_LINES"
+        continue
+    fi
 
-done < <(find "${SRC_DIRS[@]}" -type f \( -name '*.go' -o -name '*.py' -o -name '*.ts' -o -name '*.tsx' -o -name '*.js' -o -name '*.sh' \) -print0 2>/dev/null)
+    # Total lines in file
+    total_lines=$(wc -l < "$file")
+
+    # For each function start, scan forward to find end of function body
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        func_linenum=$(echo "$line" | cut -d: -f1)
+
+        # Find end: first non-indented line after func_linenum
+        func_end_linenum=$total_lines
+        reading_body=false
+
+        for ((linenum = func_linenum + 1; linenum <= total_lines; linenum++)); do
+            body_line=$(sed -n "${linenum}p" "$file")
+
+            # Skip empty lines
+            [[ -z "$body_line" ]] && continue
+
+            # Non-indented line at column 0 exits function
+            if [[ "$body_line" =~ ^[^[:space:]] ]]; then
+                func_end_linenum=$((linenum - 1))
+                break
+            fi
+
+            # Closing brace at column 0 also exits
+            if [[ "$body_line" =~ ^[[:space:]]*\} ]]; then
+                func_end_linenum=$((linenum - 1))
+                break
+            fi
+        done
+
+        # Check each implicit pattern line: is it inside this function body?
+        while IFS= read -r impl_line; do
+            [[ -z "$impl_line" ]] && continue
+            impl_linenum=$(echo "$impl_line" | cut -d: -f1)
+
+            if [[ "$impl_linenum" -ge "$func_linenum" ]] && [[ "$impl_linenum" -le "$func_end_linenum" ]]; then
+                warn "$file" "$impl_linenum"
+            fi
+        done <<< "$IMPLICIT_LINES"
+
+    done <<< "$FUNC_LINES"
+
+done < "$CANDIDATE_TMP"
+
+rm -f "$CANDIDATE_TMP"
 
 if [[ $FOUND_VIOLATIONS -eq 0 ]]; then
     echo "check-no-background-context: PASS — no implicit context capture detected"
