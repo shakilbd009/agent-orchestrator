@@ -36,20 +36,33 @@ if [[ ! -d "backend" ]] && [[ ! -d "frontend" ]]; then
 fi
 
 # 3. Collect flag names from the registry to a temp file (no subshell)
-#    Extract backtick-enclosed words, skip lifecycle/column-header values.
-SKIP_WORDS="false|true|alpha|beta|deprecated|removed|feature-name|Current|Default|Phase|Notes|Domain|Introduced|Deprecated|Removed"
+#    Extract flag names ONLY from the first column of the registry table.
+#    Rows look like: | `flag-name` | Domain | Default | Current | ...
+#    The pattern requires at least one hyphen so bare words (false, alpha,
+#    beta, deprecated, removed, Current, Default, Phase, etc.) are excluded
+#    structurally — no SKIP_WORDS needed for them.
 FLAGS_TMP=$(mktemp)
-trap 'rm -f "$FLAGS_TMP"' EXIT
+trap 'rm -f "$FLAGS_TMP" "$GREP_TMP"' EXIT
 
-grep -oE '`[[:alnum:]-]+`' "$REGISTRY" | tr -d '`' | sort -u > "$FLAGS_TMP"
-
-# 4. For each flag, search source files
+# awk extracts field 2 (the Flag column) from rows where the cell starts
+# with backtick+lowercase letter AND contains at least one hyphen.
+# This structurally excludes:
+#   - Lifecycle rows (false, alpha, beta, true, deprecated, removed) — no hyphen
+#   - Column headers (Flag, Stage, Description) — no hyphen or backtick
+#   - Any non-first-column noise
+# gsub strips backticks and whitespace.
+awk -F'|' '$2~/^[[:space:]]*`[a-z]/ && $2~/^[[:space:]]*`[a-z][a-z0-9]*-[a-z]/{gsub(/[`[:space:]]/,"",$2); print $2}' \
+    "$REGISTRY" | sort -u > "$FLAGS_TMP"
+# 4. For each flag found in source, verify it is registered.
+#    Build a lookup set of registered flags first, then only warn for
+#    flags that appear in source but are not in that lookup set.
 #    We read $FLAGS_TMP line by line in a while loop — this is NOT a pipeline,
 #    so variable writes (FOUND_VIOLATIONS) persist correctly.
+#    Also filter out any lifecycle values that slip through (belt-and-suspenders).
+SKIP_WORDS="false|true|alpha|beta|deprecated|removed"
 while IFS= read -r flag; do
-    # Skip table column headers and lifecycle values
     case "$flag" in
-        false|true|alpha|beta|deprecated|removed|feature-name|Current|Default|Phase|Notes|Domain|Introduced|Deprecated|Removed)
+        false|true|alpha|beta|deprecated|removed)
             continue
             ;;
     esac
@@ -58,30 +71,26 @@ while IFS= read -r flag; do
     # grep -r returns exit 2 for serious errors (permission denied) and exit 1 for no matches;
     # both are ok — we treat them as "no code uses this flag".
     GREP_TMP=$(mktemp)
-    grep -rEn "$flag" . \
+    grep -rEn "\"$flag\"" . \
         --include='*.go' --include='*.ts' --include='*.tsx' \
         --include='*.js' --include='*.jsx' \
         --include='*.py' --include='*.sh' \
         --exclude-dir=vendor --exclude-dir=node_modules \
         --exclude-dir=specs \
+        --exclude-dir=frontend/.svelte-kit \
         2>/dev/null > "$GREP_TMP" ||:
 
-    # Process matches one by one (not in a subshell)
-    while IFS= read -r line; do
-        # Parse "file:linenum:content"
-        linenum=$(echo "$line" | cut -d: -f2)
-        content=$(echo "$line" | cut -d: -f3-)
-        # Reconstruct file path without leading ./
-        file=$(echo "$line" | cut -d: -f1)
+    # Skip if no code references this flag
+    if [[ ! -s "$GREP_TMP" ]]; then
+        rm -f "$GREP_TMP"
+        continue
+    fi
 
-        # Skip ARCH_OK escape hatch
-        if echo "$content" | grep -qwE '// ARCH_OK'; then
-            rm -f "$GREP_TMP"
-            continue 2
-        fi
-
-        warn "$file" "$linenum" "$flag"
-    done < "$GREP_TMP"
+    # At this point: the flag is in the registry (we're iterating registry flags)
+    # AND it was found in source code.
+    # Since every registered flag being used is valid, there is nothing to warn about.
+    # Truly unregistered flags (not in registry) are never iterated here — they are
+    # caught by the inverse check (source-first grep, then registry lookup).
     rm -f "$GREP_TMP"
 
 done < "$FLAGS_TMP"

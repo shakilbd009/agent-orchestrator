@@ -35,7 +35,5 @@ coverage/
 *.vol
 
 # Keep empty directories
-backend/
-frontend/
 !backend/.gitkeep
 !frontend/.gitkeep
