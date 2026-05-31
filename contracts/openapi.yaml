@@ -434,6 +434,461 @@ components:
         Layer B agents receive tokens scoped to their assigned task.
 
 # ----------------------------------------------------------------------
+# BRD-03 — Client Portal BFF Endpoints
+# ----------------------------------------------------------------------
+# BRD-03 is primarily a BFF frontend. The backend already owns the task,
+# project, approval, risk, and milestone data models (BRD-02).
+# The BFF layer wraps BRD-02 read APIs, enforces cross-project access filtering,
+# strips SSE envelope metadata fields (actorId, actorRole, eventId, schemaVersion,
+# parentTaskId, gateId, layer), and applies publication validation before client
+# visibility. No new backend data models are introduced by BRD-03.
+#
+# NOTE: The following endpoints are stubs. Full schemas are defined in BRD-03.
+# All paths below MUST be gated on `client-portal` feature flag.
+#
+# Implemented by BFF (wrapping BRD-02 backends):
+#   GET  /client-portal/portfolio        — portfolio landing (health summary, project list)
+#   GET  /client-portal/projects/{id}   — project detail (board, risks, milestones, approvals)
+#   GET  /client-portal/approvals        — global approval inbox
+#   GET  /client-portal/search          — client-safe search across visible projects
+#
+# SSE stream (managed by BRD-02 backend):
+#   GET  /projects/{id}/events          — SSE fanout; BFF strips envelope metadata before client delivery
+#
+# Wrapped BRD-02 endpoints (not re-declared here):
+#   All task, project, approval, risk, milestone read endpoints remain under BRD-02 paths.
+#   The BFF does not re-implement backend logic — it filters and transforms BRD-02 responses.
+
+paths:
+  /client-portal/portfolio:
+    get:
+      operationId: getClientPortfolio
+      summary: Client Portal — Portfolio summary for a client principal
+      description: |
+        Returns health summary, project list, and decision counts for all projects
+        the authenticated client principal may access. Enforces cross-project
+        access filtering. Requires client-portal feature flag.
+      tags: [Client Portal — Read]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Portfolio summary retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientPortfolio'
+        '403':
+          description: Client principal access denied
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /client-portal/projects/{projectId}:
+    get:
+      operationId: getClientProjectDetail
+      summary: Client Portal — Project detail view
+      description: |
+        Returns project board, health summary, risks, milestones, approvals,
+        and comments for the specified project. Requires client-portal flag
+        and client principal access to the project.
+      tags: [Client Portal — Read]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ProjectId'
+      responses:
+        '200':
+          description: Project detail retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientProjectDetail'
+        '403':
+          description: Access denied to this project
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /client-portal/approvals:
+    get:
+      operationId: getClientApprovalInbox
+      summary: Client Portal — Global approval inbox across accessible projects
+      description: |
+        Returns pending approval items across all accessible projects for the
+        client principal. Enforces cross-project access filtering.
+      tags: [Client Portal — Read]
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Approval inbox retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientApprovalInbox'
+        '403':
+          description: Access denied
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /client-portal/search:
+    get:
+      operationId: clientPortalSearch
+      summary: Client Portal — Search across accessible projects
+      description: |
+        Full-text search across client-visible project, task, risk, milestone,
+        approval, and blocker content. Results are filtered to the client
+        principal's accessible project set. Forbidden technical fields are
+        stripped from search results before return.
+      tags: [Client Portal — Read]
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Search query string
+        - name: health
+          in: query
+          schema:
+            type: string
+            enum: [on_track, at_risk, blocked]
+          description: Filter by delivery health
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [todo, in_progress, blocked, done]
+          description: Filter by task status
+      responses:
+        '200':
+          description: Search results
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ClientSearchResults'
+        '403':
+          description: Access denied
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+components:
+  parameters:
+    ProjectId:
+      name: projectId
+      in: path
+      required: true
+      description: Project identifier
+      schema:
+        type: string
+        example: proj_9t8k2m
+
+  schemas:
+    # --- BRD-03 Client Portal Schemas ---
+
+    ClientPortfolio:
+      type: object
+      required: [projectsSummary, projectList, decisionSummary, timestamp]
+      properties:
+        projectsSummary:
+          $ref: '#/components/schemas/ProjectsHealthSummary'
+        projectList:
+          type: array
+          items:
+            $ref: '#/components/schemas/ClientProjectSummary'
+        decisionSummary:
+          $ref: '#/components/schemas/ClientDecisionSummary'
+        timestamp:
+          type: string
+          format: date-time
+
+    ProjectsHealthSummary:
+      type: object
+      properties:
+        onTrack:
+          type: integer
+        atRisk:
+          type: integer
+        blocked:
+          type: integer
+
+    ClientProjectSummary:
+      type: object
+      required: [id, name, health, confidence, completionPercent, nextMilestone, pendingDecisions, overdueDecisions, latestUpdate]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        health:
+          type: string
+          enum: [on_track, at_risk, blocked]
+        confidence:
+          type: string
+          enum: [high, medium, low]
+        completionPercent:
+          type: number
+          format: float
+          description: Calculated as done/(todo+in_progress+blocked+done); null if no active tasks
+        nextMilestone:
+          type: string
+          nullable: true
+        pendingDecisions:
+          type: integer
+        overdueDecisions:
+          type: integer
+        latestUpdate:
+          type: string
+          format: date-time
+
+    ClientDecisionSummary:
+      type: object
+      properties:
+        totalPending:
+          type: integer
+        overdue:
+          type: integer
+        waitingOnClient:
+          type: integer
+        atRiskCount:
+          type: integer
+        blockedCount:
+          type: integer
+
+    ClientProjectDetail:
+      type: object
+      required: [id, health, confidence, completionPercent, board, approvals, risks, milestones, comments, nextAction, timestamp]
+      properties:
+        id:
+          type: string
+        health:
+          type: string
+          enum: [on_track, at_risk, blocked]
+        confidence:
+          type: string
+          enum: [high, medium, low]
+        healthReason:
+          type: string
+        completionPercent:
+          type: number
+          format: float
+          nullable: true
+        board:
+          type: array
+          items:
+            $ref: '#/components/schemas/ClientTaskColumn'
+        approvals:
+          type: array
+          items:
+            $ref: '#/components/schemas/ClientApprovalItem'
+        risks:
+          type: array
+          items:
+            $ref: '#/components/schemas/ClientRiskItem'
+        milestones:
+          type: array
+          items:
+            $ref: '#/components/schemas/ClientMilestoneItem'
+        comments:
+          type: array
+          items:
+            $ref: '#/components/schemas/ClientComment'
+        nextAction:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+
+    ClientTaskColumn:
+      type: object
+      required: [status, tasks]
+      properties:
+        status:
+          type: string
+          enum: [todo, in_progress, blocked, done]
+        tasks:
+          type: array
+          items:
+            $ref: '#/components/schemas/ClientTaskCard'
+
+    ClientTaskCard:
+      type: object
+      required: [id, title, status, ownerLabel, summary, nextAction, updatedAt]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        status:
+          type: string
+          enum: [todo, in_progress, blocked, done]
+        ownerLabel:
+          type: string
+          description: Client-facing owner label (Product, Engineering, Review, Quality, Client)
+        summary:
+          type: string
+        blockerReason:
+          type: string
+          nullable: true
+        dueDate:
+          type: string
+          format: date-time
+          nullable: true
+        updatedAt:
+          type: string
+          format: date-time
+        nextAction:
+          type: string
+
+    ClientApprovalItem:
+      type: object
+      required: [id, title, ownerLabel, outcome, createdAt]
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        ownerLabel:
+          type: string
+        outcome:
+          type: string
+          enum: [pending, approved, rejected, request_changes, need_more_information]
+        createdAt:
+          type: string
+          format: date-time
+        overdue:
+          type: boolean
+
+    ClientRiskItem:
+      type: object
+      required: [id, severity, impact, ownerLabel, mitigationSummary, status, nextAction]
+      properties:
+        id:
+          type: string
+        severity:
+          type: string
+          enum: [low, medium, high, critical]
+        impact:
+          type: string
+        ownerLabel:
+          type: string
+        mitigationSummary:
+          type: string
+        status:
+          type: string
+          enum: [open, mitigated, closed]
+        nextAction:
+          type: string
+
+    ClientMilestoneItem:
+      type: object
+      required: [id, name, status, targetDate, progress, health, summary, nextAction]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        status:
+          type: string
+          enum: [pending, in_progress, completed, overdue]
+        targetDate:
+          type: string
+          format: date-time
+          nullable: true
+        progress:
+          type: number
+          format: float
+        health:
+          type: string
+          enum: [on_track, at_risk, blocked]
+        summary:
+          type: string
+        nextAction:
+          type: string
+
+    ClientComment:
+      type: object
+      required: [id, authorName, body, createdAt]
+      properties:
+        id:
+          type: string
+        authorName:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+          nullable: true
+        edited:
+          type: boolean
+        projectId:
+          type: string
+        relatedItemId:
+          type: string
+        body:
+          type: string
+
+    ClientApprovalInbox:
+      type: object
+      required: [items, totalCount, timestamp]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ClientApprovalItem'
+        totalCount:
+          type: integer
+        timestamp:
+          type: string
+          format: date-time
+
+    ClientSearchResults:
+      type: object
+      required: [items, totalCount, timestamp]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ClientSearchResultItem'
+        totalCount:
+          type: integer
+        timestamp:
+          type: string
+          format: date-time
+
+    ClientSearchResultItem:
+      type: object
+      required: [id, type, title, projectId, projectName, highlightedContent]
+      properties:
+        id:
+          type: string
+        type:
+          type: string
+          enum: [project, task, risk, milestone, approval, blocker]
+        title:
+          type: string
+        projectId:
+          type: string
+        projectName:
+          type: string
+        highlightedContent:
+          type: string
+          description: Search match snippet with forbidden technical fields already stripped
+
+# ----------------------------------------------------------------------
 # PHASE 0 CONTRACT NOTES
 # ----------------------------------------------------------------------
 #
@@ -442,7 +897,8 @@ components:
 #
 #   BRD-01 (App Shell)         → actual server URL, auth integration, CORS
 #   BRD-02 (Orchestration)     → /tasks dependency graph, gate promotion rules
-#   BRD-03 (Dashboard)         → dashboard read API endpoints
+#   BRD-02 (Orchestration)     → /tasks dependency graph, gate promotion rules
+#   BRD-03 (Client Portal)     → BFF read endpoints defined below
 #   BRD-04 (Agent Dashboard)   → agent-facing task APIs
 #   BRD-05 (LLM Provider)     → LLM inference endpoints
 #   BRD-06 (Agent Memory)      → memory store read/write endpoints
@@ -461,4 +917,12 @@ components:
 #   layer-a-agents        → enables Layer A agent operations
 #   layer-b-agents        → enables Layer B agent operations
 #   human-gates           → enables gate checkpoint enforcement
+#   client-portal         → enables /client-portal/* endpoints (BRD-03)
+
+# ADR-03-003 / OQ-03-002 contract parity notes:
+#   Task.layer (enum A|B) — internal-only field; BFF must strip from client-visible responses
+#   Task.metadata (additionalProperties: true) — client-visible publication requires metadata
+#     field name and value scanning per ADR-03-003 forbidden fields list
+#   SSE envelope fields (actorId, actorRole, eventId, schemaVersion, parentTaskId, gateId) —
+#     stripped by BFF before client SSE delivery per ADR-03-003
 #
