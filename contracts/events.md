@@ -138,6 +138,157 @@ The following are intentionally **not defined** in Phase 0 and are blocked on th
 
 ---
 
+## BRD-03 — Client Portal Events
+
+*BRD-03 Client Portal introduces client-facing events for approvals, publications, comments, and access enforcement. These events are emitted by the BFF layer and by the platform on behalf of client actions. SSE is the primary transport for live portal updates.*
+
+### Client Approval Events
+
+```
+ApprovalSubmitted
+  eventType:    "client_portal.approval.submitted"
+  projectId:    string
+  itemId:       string              # Related task/approval item ID
+  itemTitle:    string
+  outcome:      "approve" | "reject" | "request_changes" | "need_more_information"
+  actorId:      string              # Internal — stripped before client SSE delivery
+  actorName:    string              # Client display name
+  actorRole:    string              # Internal — stripped before client SSE delivery
+  comment:      string | null
+  timestamp:    ISO 8601
+  # Envelope fields (stripped from client-visible SSE):
+  #   actorId, actorRole, eventId, schemaVersion, parentTaskId, gateId
+
+ApprovalOutcomeRecorded
+  eventType:    "client_portal.approval.outcome_recorded"
+  projectId:    string
+  itemId:       string
+  outcome:      "approved" | "rejected" | "request_changes" | "need_more_information"
+  timestamp:    ISO 8601
+  # Envelope fields stripped from client-visible SSE
+
+NeedMoreInformationRequested
+  eventType:    "client_portal.approval.need_more_information"
+  projectId:    string
+  itemId:       string
+  question:     string
+  timestamp:    ISO 8601
+  # Places item in waiting-for-response state; does not count as rejection
+  # Envelope fields stripped from client-visible SSE
+```
+
+### Publication Events
+
+```
+ItemPublished
+  eventType:    "client_portal.item.published"
+  projectId:    string
+  itemId:        string
+  itemType:      "task" | "risk" | "milestone" | "blocker"
+  publishedBy:   string              # Internal actor identity
+  validationResult: "passed" | "failed"
+  timestamp:    ISO 8601
+  # Envelope fields stripped from client-visible SSE
+
+ItemUnpublished
+  eventType:    "client_portal.item.unpublished"
+  projectId:    string
+  itemId:        string
+  unpublishedBy: string
+  reason:        string
+  timestamp:     ISO 8601
+  # Envelope fields stripped from client-visible SSE
+
+PublicationValidationFailed
+  eventType:    "client_portal.publication_validation.failed"
+  projectId:    string
+  itemId:        string
+  failureReason: string              # Category only — not raw forbidden content
+  timestamp:    ISO 8601
+  # FR-03-048: items failing validation stay hidden; failureReason must not expose raw content
+```
+
+### Comment Events
+
+```
+CommentCreated
+  eventType:    "client_portal.comment.created"
+  projectId:    string
+  relatedItemId: string              # Task, risk, milestone, or approval ID
+  itemType:      "task" | "risk" | "milestone" | "approval"
+  commentId:    string
+  authorName:    string
+  body:          string
+  timestamp:     ISO 8601
+  # Envelope fields stripped from client-visible SSE
+
+CommentEdited
+  eventType:    "client_portal.comment.edited"
+  projectId:    string
+  commentId:    string
+  editedBy:      string              # Author name
+  editedAt:      ISO 8601
+  # Audit: previous body text not retained (FR-03-029)
+  # Envelope fields stripped from client-visible SSE
+
+CommentDeleted
+  eventType:    "client_portal.comment.deleted"
+  projectId:    string
+  commentId:    string
+  deletedBy:     string              # Author name
+  deletedAt:     ISO 8601
+  # Audit: deleted body text not retained (FR-03-029)
+  # Deleted comments hidden from normal client view
+  # Envelope fields stripped from client-visible SSE
+```
+
+### Access and Portal Health Events
+
+```
+AccessDenied
+  eventType:    "client_portal.access.denied"
+  principalId:   string
+  resourceType:  "project" | "task" | "risk" | "milestone" | "approval" | "comment"
+  resourceId:    string
+  timestamp:     ISO 8601
+  # NFR-03-013: access boundary failures treated as security defects
+  # Envelope fields stripped from client-visible SSE
+
+PortalReadOnlyModeEntered
+  eventType:    "client_portal.read_only_mode.entered"
+  reason:       string              # "submission_unavailable" | "read_api_degraded"
+  timestamp:    ISO 8601
+  # FR-03-053: read-only degraded mode when submission unavailable but reads work
+
+PortalReadsUnavailable
+  eventType:    "client_portal.reads.unavailable"
+  endpoint:     string              # Which read API became unavailable
+  timestamp:    ISO 8601
+  # NFR-03-009: show unavailable state, do not present stale data as current
+
+PortalSSEConnected
+  eventType:    "client_portal.sse.connected"
+  projectId:    string
+  timestamp:    ISO 8601
+
+PortalSSEDisconnected
+  eventType:    "client_portal.sse.disconnected"
+  projectId:    string
+  reason:       string
+  timestamp:    ISO 8601
+  # FR-03-041: "live updates paused" shown; manual refresh available
+```
+
+### BRD-03 Feature Flag Dependency
+
+| Flag | Controls |
+|------|----------|
+| `client-portal` | All BRD-03 events above |
+
+*BRD-03 SSE envelope strip requirement: The BFF MUST strip `actorId`, `actorRole`, `eventId`, `schemaVersion`, `parentTaskId`, `gateId`, and `layer` from all SSE event payloads before client subscription delivery (ADR-03-003, OQ-03-002 resolved).*
+
+---
+
 ## Event Transport
 
 **Phase 0 stance:** Event transport is intentionally unspecified.

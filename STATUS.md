@@ -1,7 +1,7 @@
 # STATUS.md — Agent Orchestrator Platform
 
 **Project:** agent-orchestrator  
-**Last Updated:** 2026-05-28 — BRD-02 approved for curation  
+**Last Updated:** 2026-05-30 — BRD-03 approved for curation  
 **Governance Phase:** 0 — Foundation & Governance  
 
 ---
@@ -51,6 +51,7 @@
 | BRD | Title | Status | Artifact |
 |---|---|---|---|
 | BRD-02 | Platform-Native Orchestration Pipeline | In Curation | `specs/orchestration/brd-02-platform-native-orchestration-pipeline.md` |
+| BRD-03 | Client Portal and Business Project Board | In Curation | `specs/ui/brd-03-client-portal.md` |
 
 ---
 

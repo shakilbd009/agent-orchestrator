@@ -54,6 +54,8 @@ This registry records every feature flag for the Agent Orchestrator Platform. Al
 | `change-history` | Workflow | `false` | `false` | Phase 2 | — | — | Full decision and artifact version history |
 | `post-deployment` | Operations | `false` | `false` | Phase 2 | — | — | Post-deployment monitoring and issue triage |
 | `notifications` | UX | `false` | `false` | Phase 2 | — | — | User-facing event notifications |
+| `client-portal` | UI | `false` | `false` | Phase 1 | — | — | Client-facing multi-project portal, approval actions, comments, risks, milestones, search/filter, SSE, publication validation |
+| `dashboard` | UI | `false` | `false` | Phase 1 | — | — | Business-facing project status dashboard (preserve until `client-portal` adopted; deprecation deferred to later ADR) |
 
 ---
 

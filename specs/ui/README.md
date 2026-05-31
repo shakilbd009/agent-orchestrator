@@ -8,7 +8,8 @@ BRDs in this directory address user-facing interface requirements including the 
 
 | File | Domain | Phase | Status |
 |------|--------|-------|--------|
-| BRD-03-dashboard.md | Dashboard | Phase 1 | placeholder |
+| brd-03-client-portal.md | Client Portal and Business Project Board | Phase 1 | Approved for Curation |
+| BRD-03-dashboard.md | Business Dashboard placeholder | Phase 1 | superseded by `brd-03-client-portal.md` |
 | BRD-04-agent-dashboard.md | Agent Workstream View | Phase 1 | placeholder |
 
 ## Guidelines
