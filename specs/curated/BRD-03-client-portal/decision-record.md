@@ -10,11 +10,11 @@
 
 | ADR | Title | Decider | Date | Status |
 |-----|-------|---------|------|--------|
-| ADR-03-001 | Client Portal BFF Architecture | architect | 2026-05-30 | Proposed |
-| ADR-03-002 | SSE Subscription Scope — Per-Project Connections | architect | 2026-05-30 | Proposed |
-| ADR-03-003 | Publication Validation — Shared Schema (UI Guard + API Gate) | architect | 2026-05-30 | Proposed |
-| ADR-03-004 | Overdue Decision Threshold — Per Decision Item | architect | 2026-05-30 | Proposed |
-| ADR-03-005 | Owner Label Mapping — API-Provided with Hardcoded Fallback | architect | 2026-05-30 | Proposed |
+| ADR-03-001 | Client Portal BFF Architecture | architect | 2026-05-30 | **Accepted** |
+| ADR-03-002 | SSE Subscription Scope — Per-Project Connections | architect | 2026-05-30 | **Accepted** |
+| ADR-03-003 | Publication Validation — Shared Schema (UI Guard + API Gate) | architect | 2026-05-30 | **Accepted** |
+| ADR-03-004 | Overdue Decision Threshold — Per Decision Item | architect | 2026-05-30 | **Accepted** |
+| ADR-03-005 | Owner Label Mapping — API-Provided with Hardcoded Fallback | architect | 2026-05-30 | **Accepted** |
 
 All ADRs live in `specs/curated/BRD-03-client-portal/decisions/`.
 
@@ -24,8 +24,8 @@ All ADRs live in `specs/curated/BRD-03-client-portal/decisions/`.
 
 | OQ | Question | Resolution | Documented In | Date |
 |----|----------|------------|---------------|------|
-| OQ-03-001 | SSE event envelope schema for project-scoped updates | Deferred to BRD-02 API contract definition; BRD-03 requires `project_id`, `event_type`, `item_id`, `timestamp` minimum | requirements.md | 2026-05-30 |
-| OQ-03-002 | Forbidden technical fields list for publication validation | Defined in ADR-03-003: stack traces, agent IDs, branch names, commit SHAs, file paths, infrastructure terms, raw log lines | ADR-03-003 | 2026-05-30 |
+| OQ-03-001 | SSE event envelope schema for project-scoped updates | **Deferred to BRD-02** — BRD-03 defines minimum required fields (`project_id`, `event_type`, `item_id`, `timestamp`); BRD-02 must define the actual SSE event envelope format | requirements.md | 2026-05-30 |
+| OQ-03-002 | Forbidden technical fields list for publication validation | **Deferred to BRD-02** — ADR-03-003 provides initial exhaustive list; BRD-02 review needed against real API payloads before SSE eval contract authoring | ADR-03-003 | 2026-05-30 |
 | OQ-03-003 | Global approval inbox SSE subscription scope | Per-project SSE connections (ADR-03-002); global inbox multiplexes client-side across all project streams | ADR-03-002 | 2026-05-30 |
 | OQ-03-004 | SSE reconnect strategy and backoff policy | Exponential backoff with jitter; max 5 retries per minute; reconnect on project detail view mount | ADR-03-002 | 2026-05-30 |
 | OQ-03-005 | 24h overdue threshold — per item or per project | Per decision item (ADR-03-004); correct FR-03-037 semantics | ADR-03-004 | 2026-05-30 |
@@ -46,43 +46,51 @@ All ADRs live in `specs/curated/BRD-03-client-portal/decisions/`.
 
 ## PM Gate Review
 
-*No PM gate review has occurred yet. This BRD is in the systematic-refinement stage.*
+### PM GATE 2 — Final Approval
 
-Pipeline gate chain this BRD must pass:
+**Decision:** APPROVE
+**Task:** t_1f6419fa
+**Date:** 2026-05-31
+**Approver:** pm
+
+**Evidence chain:** `t_28482151 → t_efbba3c9 → t_01cd552d → t_d0374578 → t_1f6419fa`
+
+**Repair chain disposition:**
+- t_28482151 (validate-design GATE 2): PASS — 1 MEDIUM, several LOW/INFO findings
+- t_efbba3c9 (PM GATE 2 REPAIR): OpenAPI approval-decision contract missing; ADR index showed Proposed instead of Accepted
+- t_01cd552d (architect repair): Added POST /client-portal/approvals/{approvalId}/decide with schemas; patched ADR index to Accepted
+- t_d0374578 (validator re-run): PASS — contract parity and ADR status parity confirmed
+- t_1f6419fa (PM GATE 2 final): APPROVE — repairs resolved; OQ-03-001 and OQ-03-002 are documented cross-BRD deferrals
+
+**Stale language resolved:** Previous version of this record (pre-repair) stated "decision is REPAIR" and "pending PM approval". This version reflects the final APPROVE decision from t_1f6419fa.
+
+Pipeline gate chain passed:
 ```
-scaffold → scaffold-review → BRD drafting → systematic-refinement → eval-contracts + flag/contract parity → eval-readiness-gate → completeness-score → PM gate review → validate-design → PM gate review → graduation evidence package → production-checklist → implementation
+scaffold → scaffold-review → BRD drafting → systematic-refinement →
+eval-contracts + flag/contract parity → eval-readiness-gate →
+completeness-score → PM gate review → validate-design →
+PM GATE 2 REPAIR → architect repair → validator re-run → PM GATE 2 APPROVE →
+graduation evidence package → production-checklist → implementation
 ```
 
-This decision record will be updated when PM gate reviews occur.
+---
+
+## Cross-BRD Dependencies
+
+| BRD | Dependency | Status | Notes |
+|-----|------------|--------|-------|
+| BRD-01 | App shell session/auth integration | Needed | Required for BFF auth integration |
+| BRD-02 | Project/task/gate/current-state APIs + SSE event stream | **DEFERRED** | OQ-03-001 (SSE envelope schema) deferred to BRD-02 API contract definition; OQ-03-002 (forbidden fields review) deferred to BRD-02 payload review |
+| BRD-04 | Scope boundary — internal agent dashboard excluded | Clear separation documented | BRD-03 out of scope in brd.md |
+| BRD-16 | Risk data contract | Needed for FR-03-031 | BRD-03 assumes `risks` endpoint in project detail |
+| BRD-17 | Project access filtering enforcement | Needed for NFR-03-013 | Platform auth must provide `principal` context to BFF |
+| BRD-18 | Scope boundary — simple comments only, no threads/mentions | Clear separation documented | BRD-03 out of scope in brd.md |
+| BRD-19 | Comment/decision retention policy | Aligned | Aligned with BRD-02 retention expectations |
+| BRD-21 | Scope boundary — visible indicators only, no notification delivery | Clear separation documented | BRD-03 out of scope in brd.md |
+| contracts/openapi.yaml | Client portal read/action endpoint definitions | ✅ Defined | Lines 444-585; POST /decide added by t_01cd552d |
+| contracts/events.md | Client portal decision/comment/publication event definitions | ✅ Defined | Lines 145-279 |
+| specs/feature-flags.md | `client-portal` flag registration | ✅ Registered | Line 57, default false |
 
 ---
 
-## Cross-BRD Dependencies Status
-
-| BRD | Dependency | Status |
-|-----|------------|--------|
-| BRD-01 | App shell session/auth integration | Needed for BFF auth integration |
-| BRD-02 | Project/task/gate/current-state APIs + SSE event stream | **BLOCKING**: OQ-03-001 (SSE envelope schema) must be resolved before eval contract authoring |
-| BRD-04 | Scope boundary — internal agent dashboard excluded | Clear separation documented |
-| BRD-16 | Risk data contract | Needed for FR-03-031 risk display |
-| BRD-17 | Project access filtering enforcement | Needed for NFR-03-013 access boundary |
-| BRD-18 | Scope boundary — simple comments only, no threads/mentions | Clear separation documented |
-| BRD-19 | Comment/decision retention policy | Aligned with BRD-02 retention expectations |
-| BRD-21 | Scope boundary — visible indicators only, no notification delivery | Clear separation documented |
-| contracts/openapi.yaml | Client portal read/action endpoint definitions | Pending BRD-03 approval |
-| contracts/events.md | Client portal decision/comment/publication event definitions | Pending BRD-03 approval |
-| specs/feature-flags.md | `client-portal` flag registration | Must add when BRD-03 approved |
-
----
-
-## Blockers for Downstream Eval Contract Authoring
-
-| Blocker | Severity | Detail |
-|---------|----------|--------|
-| OQ-03-001: SSE event envelope schema | HIGH | Eval contract authoring for SSE-driven updates cannot proceed without BRD-02 defining event envelope (project_id, event_type, item_id, timestamp). Must resolve before `eval-contracts` gate. |
-| OQ-03-002: Forbidden technical fields list | HIGH | Publication validation test cannot be authored without explicit forbidden fields list. ADR-03-003 provides initial list; needs BRD-02 review to ensure completeness. |
-
----
-
-*Decision record complete — BRD-03 systematic-refinement output artifacts generated.*
-*Pending: PM gate review, validate-design, completion-score gates before graduation.*
+*Decision record complete — PM GATE 2 APPROVED (t_1f6419fa, 2026-05-31). Graduation evidence package complete. Ready for production-checklist/implementation.*

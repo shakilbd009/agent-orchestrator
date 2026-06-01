@@ -538,6 +538,49 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 
+  /client-portal/approvals/{approvalId}/decide:
+    post:
+      operationId: decideClientApproval
+      summary: Client Portal — Submit approval decision
+      description: |
+        Client submits a decision on a pending approval item.
+        Supports four outcomes: approve, reject, request_changes, need_more_information.
+        reject, request_changes, and need_more_information require a comment.
+        approve may include an optional comment.
+        Enforces project-level access filtering for the client principal.
+      tags: [Client Portal — Action]
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ApprovalId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApprovalDecisionRequest'
+      responses:
+        '200':
+          description: Decision recorded successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApprovalDecisionResponse'
+        '400':
+          description: Validation error (e.g. missing required comment on reject/request_changes/need_more_information)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Access denied to this approval item
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
   /client-portal/search:
     get:
       operationId: clientPortalSearch
@@ -593,6 +636,15 @@ components:
       schema:
         type: string
         example: proj_9t8k2m
+
+    ApprovalId:
+      name: approvalId
+      in: path
+      required: true
+      description: Approval item identifier
+      schema:
+        type: string
+        example: appr_7f3k9p
 
   schemas:
     # --- BRD-03 Client Portal Schemas ---
@@ -854,6 +906,39 @@ components:
         timestamp:
           type: string
           format: date-time
+
+    ApprovalDecisionRequest:
+      type: object
+      required: [outcome]
+      properties:
+        outcome:
+          type: string
+          enum: [approve, reject, request_changes, need_more_information]
+          description: |
+            The decision made by the client.
+            approve — no comment required but one may be provided.
+            reject, request_changes, need_more_information — comment is required.
+        comment:
+          type: string
+          description: Optional comment for approve; required for reject/request_changes/need_more_information.
+          nullable: true
+        clientOwnerLabelOverride:
+          type: string
+          description: Optional client-facing owner label override for the decision record.
+          nullable: true
+
+    ApprovalDecisionResponse:
+      type: object
+      required: [success, updatedApproval]
+      properties:
+        success:
+          type: boolean
+        updatedApproval:
+          $ref: '#/components/schemas/ClientApprovalItem'
+        message:
+          type: string
+          description: Human-readable result message (e.g. validation failure reason).
+          nullable: true
 
     ClientSearchResults:
       type: object
