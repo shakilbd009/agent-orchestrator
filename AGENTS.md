@@ -149,26 +149,73 @@ Kanban task completion does not substitute for a PR. A closed kanban task is an 
 
 ---
 
-## Orchestrator Pipeline Gate Documentation
+## Orchestrator Pipeline Gate Chain
 
-The orchestrator pipeline enforces a strict gate sequence. Each gate is a Kanban task dependency edge (parent → child). A child task does not promote to `ready` until all parent tasks reach `done`.
+Every BRD moves through this gate sequence before implementation begins. Gates are Kanban task dependency edges (parent → child). A child task does not promote to `ready` until all parent tasks reach `done`. A validator task returning `done` is not approval — its output is findings; a PM gate-review task must explicitly approve before downstream work begins.
 
 ```
-[G0] Foundation & Governance
-  └─ Establishes AGENTS.md, STATUS.md, ADR 0001, .gitignore, .env.example
-  └─ No source code gates exist here
-
-[G1] App Shell Gate
-  └─ backend/ and frontend/ scaffolds exist and are runnable
-  └─ No feature code, no agent orchestration yet
-
-[G2] Core Delivery Gate
-  └─ Full orchestration pipeline is operational
-  └─ Quality gates, audit trail, dashboard implemented
-  └─ All BRD requirements addressed
+scaffold                            → pm (Phase 0 project bootstrap)
+    ↓
+scaffold-review                     → validator (post-scaffold governance gate)
+    ↓
+BRD drafting / brainstorming         → Shakil + orchestrator (top-level session only)
+                                       NO Kanban task to pm/spec-writer/brainstormer for raw BRD
+                                       If Shakil opens a separate brainstormer session,
+                                       bring output back here before downstream gating
+    ↓
+systematic-refinement                → architect + refiner (parallel)
+    ↓
+subagent-driven-development          → architect + refiner (parallel sub-task coordination)
+    ↓
+curating-artifacts                   → pm
+    ↓
+eval-contracts + flag/contract parity → qa + ops
+                                       (must exist before validate-design and implementation)
+    ↓
+eval-readiness-gate                  → validator
+                                       Verifies all eval files exist on disk,
+                                       cover every BRD FR/NFR, match OpenAPI/events contracts.
+                                       Catches missing evals before implementation begins.
+    ↓
+completeness-score                   → validator (GATE 1 — findings only)
+    ↓
+PM gate review                       → pm (decides: approve / repair / escalate)
+    ↓
+validate-design                      → validator (GATE 2 — findings only)
+    ↓
+PM gate review                       → pm (must explicitly approve)
+    ↓
+graduation evidence package          → pm
+                                       Single-folder audit trail in
+                                       specs/curated/brd-XX-<slug>/ with:
+                                         brd.md — canonical build spec
+                                         decision_record.md — PM gate decisions, OQ resolutions
+                                         validator-findings.md — consolidated findings + disposition
+                                         implementation-readiness.md — eval/flag/contract evidence
+    ↓
+production-checklist                 → ops (pre-implementation readiness)
+    ↓
+IMPLEMENTATION                       → backend / frontend-eng (ONLY NOW)
+    ↓
+backend code review                  → backend-reviewer
+                                       MANDATORY after backend implementation, before QA.
+                                       Not QA, not optional.
+    ↓
+QA: test coverage                    → qa (separate child task)
+QA: BRD compliance                   → qa (separate child task)
+    ↓
+repair loop if needed                → original implementer, then backend-reviewer/QA again
+    ↓
+ops: verify production checklist     → ops
+    against shipped implementation      MANDATORY GATE — before flag enablement
+    ↓
+ops: verify production readiness     → ops
+    before flag enablement               MANDATORY GATE
+    ↓
+FF_ENABLE_*=true in production
 ```
 
-Gates are not enforced by automation alone — each Phase transition requires a human decision to authorize the next Phase card.
+**No implementation task may be created until all preceding gates pass.**
 
 ---
 

@@ -36,14 +36,22 @@ if [[ ! -d "backend" ]] && [[ ! -d "frontend" ]]; then
 fi
 
 # 3. Collect flag names from the registry to a temp file (no subshell)
+<<<<<<< Updated upstream
 #    Extract flag names ONLY from the first column of the registry table.
 #    Rows look like: | `flag-name` | Domain | Default | Current | ...
 #    The pattern requires at least one hyphen so bare words (false, alpha,
 #    beta, deprecated, removed, Current, Default, Phase, etc.) are excluded
 #    structurally — no SKIP_WORDS needed for them.
+=======
+#    Only extract words from the first column (Flag) of the registry table.
+#    This excludes column headers and other markdown noise.
+#    Note: the Flag Lifecycle section (lines 19-25) also uses backtick-enclosed
+#    values. We filter those out below alongside column headers.
+>>>>>>> Stashed changes
 FLAGS_TMP=$(mktemp)
 trap 'rm -f "$FLAGS_TMP" "$GREP_TMP"' EXIT
 
+<<<<<<< Updated upstream
 # awk extracts field 2 (the Flag column) from rows where the cell starts
 # with backtick+lowercase letter AND contains at least one hyphen.
 # This structurally excludes:
@@ -56,6 +64,19 @@ awk -F'|' '$2~/^[[:space:]]*`[a-z]/ && $2~/^[[:space:]]*`[a-z][a-z0-9]*-[a-z]/{g
 # 4. For each flag found in source, verify it is registered.
 #    Build a lookup set of registered flags first, then only warn for
 #    flags that appear in source but are not in that lookup set.
+=======
+# Stage-1: extract flag names from registry table rows where the first cell is a kebab-case flag.
+# The pattern `| `[a-z][a-z0-9]*-[a-z0-9-]+`` (32 hits) matches every flag row.
+# Note: without the backslash before | the pattern hits the Flag Lifecycle section too (77 hits).
+# `[a-z][a-z0-9]*-[a-z0-9-]+` requires at least one hyphen — this structurally excludes:
+#   - lifecycle values (false, true, alpha, beta, deprecated, removed) — no hyphens
+#   - column headers (Current, Default, Phase, Notes, Domain, Introduced, Deprecated, Removed)
+#   - any bare short word that might appear in a non-first column
+# We additionally filter any remaining bare words via case below as a safety net.
+grep -E '^\| `[a-z][a-z0-9]*-[a-z0-9-]+`' "$REGISTRY" | awk -F'|' '{gsub(/[\` \t]/,"",$2); print $2}' | sort -u > "$FLAGS_TMP"
+
+# 4. For each flag, search source files
+>>>>>>> Stashed changes
 #    We read $FLAGS_TMP line by line in a while loop — this is NOT a pipeline,
 #    so variable writes (FOUND_VIOLATIONS) persist correctly.
 #    Also filter out any lifecycle values that slip through (belt-and-suspenders).

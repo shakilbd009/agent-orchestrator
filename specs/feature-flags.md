@@ -29,7 +29,8 @@ This registry records every feature flag for the Agent Orchestrator Platform. Al
 
 | Flag | Domain | Default | Current | Introduced | Deprecated | Removed | Notes |
 |------|--------|---------|---------|------------|------------|---------|-------|
-| `kanban-orchestrator` | Orchestration | `false` | `false` | Phase 0 | — | — | Kanban-first task orchestration pipeline |
+| `kanban-orchestrator` | Orchestration | `false` | `false` | Phase 0 | — | — | Legacy/compatibility naming from Phase 0; new platform-native behavior controlled by `platform-orchestration` (BRD-02). |
+| `platform-orchestration` | Orchestration | `false` | `false` | Phase 0 | — | — | Master flag for platform-native project/task/gate/orchestration pipeline (BRD-02). Sub-capabilities continue to respect `layer-a-agents`, `layer-b-agents`, `human-gates`, and `audit-trail` where applicable. |
 | `layer-a-agents` | Orchestration | `false` | `false` | Phase 0 | — | — | Layer A agent profiles (orchestrator, pm, architect) |
 | `layer-b-agents` | Orchestration | `false` | `false` | Phase 0 | — | — | Layer B agent profiles (developer, reviewer, qa, devops) |
 | `human-gates` | Governance | `false` | `false` | Phase 0 | — | — | Human approval checkpoints in the pipeline |

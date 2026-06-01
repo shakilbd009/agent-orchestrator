@@ -1,14 +1,74 @@
-# contracts/events.md — Async / Event Contract Placeholder
+# contracts/events.md — Async / Event Contract
 
 **Project:** agent-orchestrator
-**Phase:** 0 — Governance & Scaffolding
-**Status:** Placeholder (events not defined until BRDs are authored)
+**Phase:** 1 — BRD-02 Platform-Native Orchestration Pipeline
+**Status:** Canonical — per BRD-02 (FR-02-022, FR-02-022A, FR-02-023, FR-02-024, FR-02-025, FR-02-028, FR-02-032)
 
 ---
 
 ## Purpose
 
-This document records the async / event contract boundaries for the Agent Orchestrator Platform. It establishes what is intentionally deferred, what is explicitly not applicable, and the placeholder shapes that downstream systems may rely on during Phase 0.
+This document records the async / event contract boundaries for the Agent Orchestrator Platform. All audit and integration events use the canonical envelope defined in FR-02-022A. Event transport is provided via two channels: a project-scoped Server-Sent Events (SSE) stream for first-party dashboard clients (FR-02-023) and registered outbound webhooks for external consumers (FR-02-024/025).
+
+---
+
+## Schema Versioning Convention
+
+Orchestration event schemas use **v1alpha** for Phase 1 and Phase 2 implementations per OQ-291. Consumers SHOULD treat v1alpha as unstable and expect field additions or changes within the v1alpha lineage. A transition to `v1` will be announced via an ADR and will include a migration guide for existing consumers.
+
+Schema version appears in every event envelope as the `schemaVersion` field. Consumers MUST tolerate the presence of additional fields not defined in their current schema version.
+
+---
+
+## Canonical Event Envelope
+
+Every audit and integration event MUST use the following 11-field envelope:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `eventId` | `string` (UUIDv4) | Globally unique event identifier; assigned by the platform at emission time |
+| `schemaVersion` | `string` | Schema identifier for this event family; format `v1alpha` through Phase 2, e.g. `v1alpha` |
+| `projectId` | `string` | Project-scoped ID for this event; required on all project/task/gate/handoff events |
+| `topic` | `string` | Event topic string used as SSE `event` field; dot-separated hierarchical type, e.g. `task.created`, `gate.approved` |
+| `actorId` | `string` | Principal ID of the actor who triggered this event; `system` when emitted by a background process |
+| `actorRole` | `string` | Role of the actor at emission time: `human`, `layer_a`, `layer_b`, or `system` |
+| `taskId` | `string \| null` | Related task ID if the event pertains to a specific task; null otherwise |
+| `parentTaskId` | `string \| null` | Parent task ID for child task events; null for non-child events |
+| `gateId` | `string \| null` | Related gate ID for gate lifecycle events; null otherwise |
+| `timestamp` | `string` (ISO 8601) | UTC timestamp assigned at event emission; format `YYYY-MM-DDTHH:mm:ss.SSSZ` |
+| `payload` | `object` | Event-type-specific payload; structure defined per topic below |
+
+Fields that are not applicable to an event type SHOULD be set to `null` rather than omitted, unless the event schema for that topic explicitly omits the field.
+
+---
+
+## Envelope + Payload Pattern
+
+Every event topic defines a specific `payload` shape. The envelope fields are always present; the payload varies by topic.
+
+Example — `TaskCreated` event:
+
+```json
+{
+  "eventId": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+  "schemaVersion": "v1alpha",
+  "projectId": "proj_01J9X",
+  "topic": "task.created",
+  "actorId": "agent_planner_a",
+  "actorRole": "layer_a",
+  "taskId": "t_abc1234",
+  "parentTaskId": "t_parent_xyz",
+  "gateId": null,
+  "timestamp": "2026-05-28T14:32:00.000Z",
+  "payload": {
+    "taskType": "feature",
+    "assignee": "layer_b_specialist",
+    "title": "Implement user auth endpoint",
+    "executionStatus": "todo",
+    "layer": "B"
+  }
+}
+```
 
 ---
 
@@ -16,111 +76,489 @@ This document records the async / event contract boundaries for the Agent Orches
 
 | Layer | Event Responsibility | Notes |
 |-------|---------------------|-------|
-| Layer A (orchestrator) | Emits task lifecycle events, gate transition events, agent handoff events | These drive the Kanban state machine and audit trail |
-| Layer B (specialist) | Emits task completion signals, quality gate delivery events | These feed into Layer A gate enforcement |
+| Layer A (orchestrator) | Emits task lifecycle events, gate transition events, decomposition events, agent handoff events | These drive the Kanban state machine and audit trail |
+| Layer B (specialist) | Emits task completion signals with structured handoff evidence, quality gate delivery events | These feed into Layer A gate enforcement |
 | Platform | Emits health, status, feature flag change events | These are infrastructure-level only |
 
 ---
 
-## Placeholder Event Shapes
+## Event Topic Registry
 
-The following event schemas are stubs. They define the event envelope structure only — field semantics are filled with placeholder descriptions. Full field definitions require their respective BRDs.
+All topics follow the pattern `<entity>.<action>` or `<entity>.<subcategory>.<action>`.
 
 ### Task Lifecycle Events
 
-```
-TaskCreated
-  taskId:        string           # Kanban task ID
-  parentId:      string | null    # Parent task ID if this is a child decomposition
-  layer:         "A" | "B"
-  assignee:      string
-  timestamp:     ISO 8601
+#### `task.created`
+Platform emits when an active task is created under a project.
 
-TaskPromoted
-  taskId:        string
-  fromGate:      string           # Gate ID (e.g. "G0", "G1")
-  toGate:        string
-  promotedBy:    string           # Agent profile name
-  timestamp:     ISO 8601
-
-TaskCompleted
-  taskId:        string
-  completedBy:   string           # Agent profile name
-  summary:       string           # Human-readable handoff summary
-  metadata:      object           # Arbitrary key/value from the completing agent
-  timestamp:     ISO 8601
-
-TaskBlocked
-  taskId:        string
-  blockedBy:     string
-  reason:        string           # One-sentence blocker description
-  timestamp:     ISO 8601
+```json
+{
+  "payload": {
+    "taskType": "string",
+    "assignee": "string | null",
+    "title": "string",
+    "executionStatus": "todo | in_progress | blocked | done | cancelled",
+    "layer": "A | B",
+    "required": "boolean",
+    "staleThresholdMinutes": "number | null"
+  }
+}
 ```
 
-### Quality Gate Events
+#### `task.status.changed`
+Platform emits when task execution status changes.
 
+```json
+{
+  "payload": {
+    "fromStatus": "string",
+    "toStatus": "string",
+    "reason": "string | null"
+  }
+}
 ```
-GateOpened
-  gateId:        string           # e.g. "G0", "G1"
-  taskId:        string           # Task that opened this gate
-  timestamp:     ISO 8601
 
-GateApproved
-  gateId:         string
-  approvedBy:    string           # Human principal or "architect" agent
-  taskId:        string
-  timestamp:     ISO 8601
+#### `task.stale.detected`
+Platform emits when a task exceeds its configured stale threshold without status mutation.
 
-GateRejected
-  gateId:         string
-  rejectedBy:    string
-  taskId:        string
-  feedback:      string           # Human or agent rejection reason
-  timestamp:     ISO 8601
+```json
+{
+  "payload": {
+    "staleThresholdMinutes": "number",
+    "lastActivityAt": "string (ISO 8601)"
+  }
+}
+```
+
+#### `task.blocked`
+Platform emits when a task transitions to `blocked` explicitly.
+
+```json
+{
+  "payload": {
+    "blockedBy": "string",
+    "reason": "string"
+  }
+}
+```
+
+#### `task.cancelled`
+Platform emits when a task is cancelled.
+
+```json
+{
+  "payload": {
+    "cancelledBy": "string",
+    "wasRequiredForParent": "boolean",
+    "reason": "string | null"
+  }
+}
+```
+
+#### `task.completed`
+Platform emits when a task reaches `done` with Layer B structured handoff evidence.
+
+```json
+{
+  "payload": {
+    "completedBy": "string",
+    "summary": "string",
+    "artifacts": "string[]",
+    "validationPerformed": "string",
+    "risksOrResidualIssues": "string | null",
+    "recommendedNextGate": "string | null"
+  }
+}
+```
+
+### Decomposition Events
+
+#### `task.decomposition.proposed`
+Layer A or human actor proposes child tasks for a parent.
+
+```json
+{
+  "payload": {
+    "parentTaskId": "string",
+    "proposedChildren": [
+      {
+        "taskId": "string",
+        "title": "string",
+        "taskType": "string",
+        "assignee": "string | null",
+        "layer": "A | B",
+        "required": "boolean"
+      }
+    ],
+    "depthAtProposal": "number",
+    "activeChildrenCount": "number"
+  }
+}
+```
+
+#### `task.decomposition.approved`
+Proposed decomposition is approved; children become active tasks.
+
+```json
+{
+  "payload": {
+    "parentTaskId": "string",
+    "approvedBy": "string",
+    "approvedByRole": "human | layer_a",
+    "childTaskIds": ["string"],
+    "depthUsed": "number"
+  }
+}
+```
+
+#### `task.decomposition.rejected`
+Proposed decomposition is rejected with reason.
+
+```json
+{
+  "payload": {
+    "parentTaskId": "string",
+    "rejectedBy": "string",
+    "rejectionReason": "string",
+    "proposalRetained": "boolean"
+  }
+}
+```
+
+#### `task.decomposition.override_used`
+Project decomposition limits are overridden.
+
+```json
+{
+  "payload": {
+    "parentTaskId": "string",
+    "overrideBy": "string",
+    "overrideType": "depth | fan_out | both",
+    "oldLimit": "number",
+    "newLimit": "number",
+    "auditReason": "string"
+  }
+}
+```
+
+### Gate Lifecycle Events
+
+#### `gate.opened`
+A project-level or task-level gate opens.
+
+```json
+{
+  "payload": {
+    "gateType": "scope_review | architecture_review | implementation_review | code_review | qa_review | release_review | phase_gate",
+    "gateLevel": "project | task",
+    "blocking": "boolean",
+    "openedBy": "string"
+  }
+}
+```
+
+#### `gate.approved`
+A gate is approved.
+
+```json
+{
+  "payload": {
+    "approvedBy": "string",
+    "approverRole": "human | layer_a",
+    "gateType": "string",
+    "gateLevel": "project | task"
+  }
+}
+```
+
+#### `gate.rejected`
+A gate is rejected with reason.
+
+```json
+{
+  "payload": {
+    "rejectedBy": "string",
+    "rejectionReason": "string",
+    "gateType": "string",
+    "gateLevel": "project | task"
+  }
+}
 ```
 
 ### Agent Events
 
+#### `agent.activated`
+Agent begins work on a task.
+
+```json
+{
+  "payload": {
+    "agentName": "string",
+    "layer": "A | B",
+    "taskId": "string | null"
+  }
+}
 ```
-AgentActivated
-  agentName:     string
-  layer:         "A" | "B"
-  taskId:        string | null
-  timestamp:     ISO 8601
 
-AgentIdle
-  agentName:     string
-  layer:         "A" | "B"
-  timestamp:     ISO 8601
+#### `agent.idle`
+Agent has no active task assignment.
 
-AgentBlocked
-  agentName:     string
-  layer:         "A" | "B"
-  taskId:        string
-  reason:        string
-  timestamp:     ISO 8601
+```json
+{
+  "payload": {
+    "agentName": "string",
+    "layer": "A | B",
+    "idleSince": "string (ISO 8601) | null"
+  }
+}
+```
+
+#### `agent.blocked`
+Agent cannot proceed due to a task-level blocker.
+
+```json
+{
+  "payload": {
+    "agentName": "string",
+    "layer": "A | B",
+    "taskId": "string",
+    "reason": "string"
+  }
+}
+```
+
+### Handoff Events
+
+#### `handoff.submitted`
+Layer B submits structured completion evidence for an assigned task.
+
+```json
+{
+  "payload": {
+    "taskId": "string",
+    "submittedBy": "string",
+    "summary": "string",
+    "artifacts": "string[]",
+    "validationPerformed": "string",
+    "risksOrResidualIssues": "string | null",
+    "recommendedNextGate": "string | null"
+  }
+}
+```
+
+### Project Events
+
+#### `project.created`
+A new project is created.
+
+```json
+{
+  "payload": {
+    "projectName": "string",
+    "createdBy": "string",
+    "staleThresholdMinutes": "number",
+    "decompositionDepthDefault": "number",
+    "decompositionFanOutDefault": "number"
+  }
+}
 ```
 
 ### Platform Events
 
-```
-PlatformHealthChanged
-  status:        "healthy" | "degraded" | "maintenance"
-  timestamp:     ISO 8601
+#### `platform.health.changed`
+Platform health status changes.
 
-FeatureFlagChanged
-  flagName:      string           # Matches keys in specs/feature-flags.md
-  oldValue:      boolean
-  newValue:      boolean
-  changedBy:     string
-  timestamp:     ISO 8601
+```json
+{
+  "payload": {
+    "fromStatus": "healthy | degraded | maintenance",
+    "toStatus": "healthy | degraded | maintenance",
+    "changedBy": "string"
+  }
+}
 ```
+
+#### `feature_flag.changed`
+A feature flag value changes.
+
+```json
+{
+  "payload": {
+    "flagName": "string",
+    "oldValue": "boolean",
+    "newValue": "boolean",
+    "changedBy": "string"
+  }
+}
+```
+
+### Audit / Security Events
+
+#### `auth.mutation.denied`
+Unauthorized mutation attempt is rejected.
+
+```json
+{
+  "payload": {
+    "actorId": "string",
+    "actorRole": "string",
+    "attemptedAction": "string",
+    "deniedReason": "string"
+  }
+}
+```
+
+#### `webhook.delivery.failed`
+Webhook exhausts all retry attempts.
+
+```json
+{
+  "payload": {
+    "webhookId": "string",
+    "eventTopic": "string",
+    "attemptCount": "number",
+    "lastError": "string",
+    "eventId": "string"
+  }
+}
+```
+
+### SSE Client Events
+
+#### `sse.client.connected`
+SSE client connects to a project event stream.
+
+```json
+{
+  "payload": {
+    "clientId": "string",
+    "projectId": "string",
+    "remoteAddr": "string"
+  }
+}
+```
+
+#### `sse.client.disconnected`
+SSE client disconnects from a project event stream.
+
+```json
+{
+  "payload": {
+    "clientId": "string",
+    "projectId": "string",
+    "disconnectReason": "string | null"
+  }
+}
+```
+
+---
+
+## SSE Event Stream Specification
+
+**Endpoint:** `GET /projects/{projectId}/events/stream`
+
+**Authentication:** Requires valid project-scoped session token.
+
+**SSE Fields:**
+
+| SSE Field | Source |
+|-----------|--------|
+| `event` | `topic` from the canonical envelope |
+| `id` | `eventId` from the canonical envelope |
+| `data` | Full JSON-serialized canonical envelope |
+| `retry` | Server-suggested reconnect interval in milliseconds (default: 5000) |
+
+**Behavior (FR-02-023):**
+- Connected clients receive all committed orchestration events for their project without polling.
+- Events are delivered in emission order.
+- The platform MUST deliver events within 2 seconds of commitment (NFR-02-008).
+
+**Reconnect / Catch-up (FR-02-023A):**
+- Clients MAY reconnect with an `Last-Event-ID` header containing the last `eventId` received.
+- The platform SHOULD replay missed project events from the immutable audit log to the reconnecting client.
+- Catch-up replay does not imply event replay as the operational source of truth — it only provides dashboard continuity.
+- The platform MAY limit replay to events from the last 24 hours or a configurable window.
+
+**Client Example:**
+```
+GET /projects/proj_01J9X/events/stream
+Headers:
+  Authorization: Bearer <token>
+  Accept: text/event-stream
+```
+
+```
+event: task.created
+id: f47ac10b-58cc-4372-a567-0e02b2c3d479
+data: {"eventId":"f47ac10b-58cc-4372-a567-0e02b2c3d479","schemaVersion":"v1alpha","projectId":"proj_01J9X","topic":"task.created","actorId":"agent_planner_a","actorRole":"layer_a","taskId":"t_abc1234","parentTaskId":null,"gateId":null,"timestamp":"2026-05-28T14:32:00.000Z","payload":{...}}
+
+event: gate.approved
+id: 7c9e6679-7425-40de-944b-e07fc1f90ae7
+data: {"eventId":"7c9e6679-7425-40de-944b-e07fc1f90ae7","schemaVersion":"v1alpha","projectId":"proj_01J9X","topic":"gate.approved","actorId":"h_human_01","actorRole":"human","taskId":"t_abc1234","parentTaskId":null,"gateId":"g_task_scope_01","timestamp":"2026-05-28T14:35:00.000Z","payload":{...}}
+```
+
+---
+
+## Webhook Delivery Specification
+
+**Registration:** Projects MAY register outbound webhook consumers via the webhook registration API. Registration specifies:
+- `webhookUrl`: Target URL for delivery
+- `eventSelector`: Event topic or prefix pattern to subscribe to (e.g., `task.*`, `gate.approved`, `task.decomposition.*`)
+- `secret`: Required for non-dev webhook URLs (localhost/127.0.0.1 exempt). Used for HMAC-SHA256 request signing.
+
+**Delivery (FR-02-024):**
+- Webhook delivery is asynchronous and MUST NOT block or roll back the originating task/gate state change.
+- Delivery latency target: webhook jobs enqueued within 1 second of the committed event (NFR-02-009).
+- Delivery is fire-and-forget from the perspective of the originating mutation — webhook failure MUST NOT roll back committed state (NFR-02-010).
+
+**Retry Policy (FR-02-025):**
+- Failed webhook deliveries retry with exponential backoff: 1s, 2s, 4s, 8s, ... up to the configured retry limit.
+- Default retry count: 3 attempts.
+- Exhausted deliveries are logged as `webhook.delivery.failed`, increment the `orch_webhook_delivery_failed_total` metric, and are visible in project audit/event views.
+
+**Request Shape:**
+```
+POST <webhookUrl>
+Headers:
+  Content-Type: application/json
+  X-Event-Id: <eventId>
+  X-Event-Topic: <topic>
+  X-Project-Id: <projectId>
+  X-Delivery-Attempt: <attempt number>
+  X-Webhook-Signature: <HMAC-SHA256(body, secret)>  [non-dev URLs always; localhost/127.0.0.1 exempt per ADR-02-003]
+Body: <canonical envelope JSON>
+```
+
+**Response Handling:**
+- HTTP 2xx within 10 seconds: delivery considered successful.
+- HTTP non-2xx or timeout: delivery considered failed and eligible for retry.
+- Connection errors (DNS failure, connection refused): eligible for retry.
+
+---
+
+## Feature Flag Dependencies
+
+Event emission is gated by the following feature flags (from `specs/feature-flags.md`):
+
+| Flag | Controls |
+|------|---------|
+| `platform-orchestration` (master gate) | All project/task/gate/orchestration events; must be `true` for any BRD-02 event to emit. Sub-capabilities continue to respect their own flags. |
+| `layer-a-agents` | `AgentActivated`, `AgentIdle`, `agent.blocked` for Layer A agents; `task.decomposition.proposed` |
+| `layer-b-agents` | `AgentActivated`, `AgentIdle`, `agent.blocked` for Layer B agents; `task.completed`, `handoff.submitted` |
+| `human-gates` | `GateOpened`, `GateApproved`, `GateRejected` for human-controlled gates |
+| `audit-trail` | All immutable audit event persistence and audit/event query APIs |
+| `feature-flags` | `FeatureFlagChanged` events |
+
+**`platform-orchestration` as master gate (FR-02-028):**
+- When `platform-orchestration=false`, the platform rejects or hides all project-scoped orchestration capabilities, including the SSE stream and webhook delivery.
+- `kanban-orchestrator` is a legacy/compatibility flag from Phase 0. New platform-native behavior is exclusively controlled by `platform-orchestration`.
+- Sub-capability flags (`layer-a-agents`, `layer-b-agents`, `human-gates`, `audit-trail`) remain as secondary gates within the enabled orchestration surface.
 
 ---
 
 ## Explicit Non-Applicability
 
-The following are intentionally **not defined** in Phase 0 and are blocked on their respective BRDs:
+The following are intentionally **not defined** in BRD-02 and are blocked on their respective BRDs:
 
 | Not Defined | Blocked On | Reason |
 |------------|------------|--------|
@@ -138,6 +576,7 @@ The following are intentionally **not defined** in Phase 0 and are blocked on th
 
 ---
 
+<<<<<<< Updated upstream
 ## BRD-03 — Client Portal Events
 
 *BRD-03 Client Portal introduces client-facing events for approvals, publications, comments, and access enforcement. These events are emitted by the BFF layer and by the platform on behalf of client actions. SSE is the primary transport for live portal updates.*
@@ -321,32 +760,41 @@ Event emission is gated by the following feature flags (from `specs/feature-flag
 
 ---
 
+=======
+>>>>>>> Stashed changes
 ## Audit Trail Contract
 
-Every event in this system is an **immutable audit record**. The event store must be append-only. No event may be retracted or rewritten after emission.
+Every event in this system is an **immutable audit record**. The event store is append-only. No event may be retracted, rewritten, or reordered after emission.
 
-This contract is not enforced in Phase 0. Enforcement is blocked on:
-- BRD-02 (Orchestration Pipeline) — defines the event store
-- BRD-19 (Change History) — defines retention and immutability rules
+Immutable audit event persistence is gated by the `audit-trail` feature flag. When `audit-trail=false`, the platform MAY omit audit event persistence but MUST NOT roll back or modify any committed task/gate/handoff state.
 
 ---
 
-## Phase 0 Summary
+## BRD-02 Phase 1 Summary
 
 | Item | Status |
 |------|--------|
-| Event envelope schema (topic, taskId, timestamp, source) | Placeholder — defined above |
-| Layer A / Layer B event ownership | Defined above |
-| Task lifecycle event shapes | Placeholder |
-| Quality gate event shapes | Placeholder |
-| Agent event shapes | Placeholder |
-| Platform event shapes | Placeholder |
-| Event transport mechanism | **Not defined** — deferred to BRD-02 |
-| LLM inference events | **Not applicable** — deferred to BRD-05 |
-| Memory store events | **Not applicable** — deferred to BRD-06 |
-| Notification events | **Not applicable** — deferred to BRD-21 |
-| Audit trail immutability | **Not enforced** — deferred to BRD-19 |
+| Canonical 11-field event envelope | Defined — per FR-02-022A |
+| Envelope + payload pattern | Defined — all topics use envelope+payload |
+| Schema versioning convention | v1alpha for Phase 1/2 — per OQ-291 |
+| SSE event stream spec | Defined — `GET /projects/{projectId}/events/stream`, FR-02-023 |
+| SSE reconnect / catch-up | Defined — `Last-Event-ID` header, FR-02-023A |
+| Webhook delivery spec | Defined — async, non-blocking, FR-02-024 |
+| Webhook retry spec | Defined — exponential backoff, default 3, FR-02-025 |
+| Master flag gating | `platform-orchestration` as master; `kanban-orchestrator` legacy |
+| Layer A / Layer B event ownership | Defined |
+| Task lifecycle event shapes | Canonical — envelope+payload |
+| Decomposition event shapes | Canonical — envelope+payload |
+| Gate lifecycle event shapes | Canonical — envelope+payload |
+| Agent event shapes | Canonical — envelope+payload |
+| Handoff event shapes | Canonical — envelope+payload |
+| Platform event shapes | Canonical — envelope+payload |
+| Audit/security event shapes | Canonical — envelope+payload |
+| LLM inference events | Not applicable — deferred to BRD-05 |
+| Memory store events | Not applicable — deferred to BRD-06 |
+| Notification events | Not applicable — deferred to BRD-21 |
+| Audit trail immutability | Deferred to BRD-02 implementation + BRD-19 |
 
 ---
 
-*This document is a Phase 0 placeholder. Do not implement event handlers or consumers based on this contract without a BRD defining the event semantics and transport.*
+*This document reflects BRD-02 canonical event contracts. All event shapes use the canonical 11-field envelope and envelope+payload pattern. Event transport is provided via SSE stream and outbound webhooks per FR-02-023, FR-02-024, and FR-02-025.*

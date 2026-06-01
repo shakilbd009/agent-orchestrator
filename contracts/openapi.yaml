@@ -2,15 +2,15 @@ openapi: 3.1.0
 info:
   title: Agent Orchestrator Platform — API Contract
   description: |
-    Phase 0 placeholder contract.
-    All product endpoints are reserved until their respective BRDs are authored.
-    This document defines the API metadata structure, common schema placeholders,
-    and the Layer A / Layer B separation contract.
-  version: 0.1.0-placeholder
+    BRD-02 contract for project-scoped orchestration.
+    Defines Project, OrchestrationTask, TaskDependency, TaskGate, ProjectPhaseGate,
+    DecompositionProposal, WebhookRegistration, and HandoffEvidence schemas.
+    Covers project CRUD, task graph management, phase gates, SSE stream, and webhooks.
+  version: 0.2.0-brd02
 
 servers:
   - url: https://api.agentorchestrator.example.com/v1
-    description: Placeholder server — BRD-01 defines actual deployment target
+    description: Placeholder server — BRD-01 defines actual deployment /credentials target
 
 security:
   - BearerAuth: []
@@ -29,6 +29,11 @@ tags:
     description: |
       Platform-level metadata endpoints: health, status, agent registry,
       and feature flags. These do not contain product business logic.
+  - name: Project — Orchestration
+    description: |
+      Project-scoped endpoints for BRD-02. All project-scoped work lives here:
+      project CRUD, task graph management, phase gates, SSE event stream,
+      and webhook registration.
 
 paths:
   /health:
@@ -61,6 +66,646 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/PlatformStatus'
+
+  # --------------------------------------------------------------------------
+  # Project-scoped endpoints (BRD-02)
+  # --------------------------------------------------------------------------
+
+  /projects:
+    get:
+      operationId: listProjects
+      summary: List all projects
+      description: |
+        Returns all projects visible to the caller. Includes aggregate statistics
+        (task counts, phase state, active gate count).
+      tags: [Project — Orchestration]
+      responses:
+        '200':
+          description: Project list retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+    post:
+      operationId: createProject
+      summary: Create a new project
+      description: |
+        Creates a project with an optional initial phase gate configuration.
+        The creating agent becomes the project owner.
+      tags: [Project — Orchestration]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProjectCreateRequest'
+      responses:
+        '201':
+          description: Project created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /projects/{projectId}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      operationId: getProject
+      summary: Retrieve project details
+      tags: [Project — Orchestration]
+      responses:
+        '200':
+          description: Project retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    patch:
+      operationId: updateProject
+      summary: Update project metadata or phase configuration
+      description: |
+        Allows project owners to rename a project, update its description,
+        or modify phase gate sequencing. Task assignments cannot be changed via this endpoint.
+      tags: [Project — Orchestration]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProjectUpdateRequest'
+      responses:
+        '200':
+          description: Project updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    delete:
+      operationId: deleteProject
+      summary: Archive a project
+      description: |
+        Soft-deletes the project. All tasks under this project are archived in bulk.
+        The project cannot be deleted if any task is in an active (non-terminal) state.
+      tags: [Project — Orchestration]
+      responses:
+        '204':
+          description: Project archived
+        '409':
+          description: Project has active tasks; resolve them first
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /projects/{projectId}/tasks:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      operationId: listProjectTasks
+      summary: List all tasks within a project
+      description: |
+        Returns all tasks for a project, optionally filtered by status, layer,
+        or assignee. Includes task dependency edges.
+      tags: [Project — Orchestration]
+      parameters:
+        - name: status
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/TaskStatus'
+        - name: layer
+          in: query
+          required: false
+          schema:
+            $ref: '#/components/schemas/Layer'
+        - name: assignee
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Task list for project
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectTaskListResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    post:
+      operationId: createProjectTask
+      summary: Layer A — Create and decompose a task within a project
+      description: |
+        Creates an OrchestrationTask scoped to this project. Attaches child-task
+        dependency graphs. This is the entry point for all project work decomposition.
+        Layer B agents must NOT call this endpoint directly.
+      tags: [Project — Orchestration]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/OrchestrationTaskCreateRequest'
+      responses:
+        '201':
+          description: Task created under project
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrchestrationTask'
+        '403':
+          description: Caller is not a Layer A agent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /projects/{projectId}/tasks/{taskId}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/TaskId'
+    get:
+      operationId: getProjectTask
+      summary: Retrieve task details and current state within a project
+      tags: [Project — Orchestration, Layer A — Orchestrator, Layer B — Specialist]
+      responses:
+        '200':
+          description: Task retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrchestrationTask'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /projects/{projectId}/tasks/{taskId}/promote:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/TaskId'
+    post:
+      operationId: promoteProjectTask
+      summary: Layer A — Promote task to next pipeline gate
+      description: |
+        Advances a task to its next defined gate. Layer B agents may not
+        promote tasks past their quality gate. Human approval is required
+        at configured gate boundaries.
+      tags: [Project — Orchestration]
+      responses:
+        '200':
+          description: Task promoted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrchestrationTask'
+        '403':
+          description: Promotion not authorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /projects/{projectId}/tasks/{taskId}/complete:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/TaskId'
+    post:
+      operationId: completeProjectTask
+      summary: Layer B — Mark task as done and signal gate handoff
+      description: |
+        Layer B agents mark their task as done. This does NOT automatically
+        close the quality gate — the gate remains open until Layer A or a
+        human approves the handoff. Attaches HandoffEvidence.
+      tags: [Project — Orchestration]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskCompleteRequest'
+      responses:
+        '200':
+          description: Task marked complete; gate handoff initiated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrchestrationTask'
+        '403':
+          description: Caller is not the assigned Layer B agent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /projects/{projectId}/tasks/{taskId}/block:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/TaskId'
+    post:
+      operationId: blockProjectTask
+      summary: Request human input to proceed
+      description: |
+        Transitions task to blocked state. A blocked task halts pipeline
+        advancement until the blocker is resolved by a human.
+      tags: [Project — Orchestration]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BlockRequest'
+      responses:
+        '200':
+          description: Task blocked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OrchestrationTask'
+
+  /projects/{projectId}/tasks/{taskId}/dependencies:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/TaskId'
+    get:
+      operationId: getTaskDependencies
+      summary: List all explicit dependencies for a task
+      description: |
+        Returns both parent dependencies (upstream blockers) and child dependencies
+        (downstream dependents) as TaskDependency records.
+      tags: [Project — Orchestration]
+      responses:
+        '200':
+          description: Dependency graph for task
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskDependencyGraph'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /projects/{projectId}/tasks/{taskId}/dependencies:
+    put:
+      operationId: replaceTaskDependencies
+      summary: Layer A — Replace dependency edges for a task
+      description: |
+        Atomically replaces the full set of dependency edges for a task.
+        Accepts a list of TaskDependency records. Cycles are rejected with 422.
+      tags: [Project — Orchestration]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskDependencyReplaceRequest'
+      responses:
+        '200':
+          description: Dependencies updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskDependencyGraph'
+        '422':
+          - description: Dependency cycle detected
+            content:
+              application/json:
+                schema:
+                  $ref: '#/components/schemas/Error'
+
+  /projects/{projectId}/tasks/{taskId}/gate:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/TaskId'
+    post:
+      operationId: createTaskGate
+      summary: Layer A — Attach a quality gate to a task
+      description: |
+        Attaches a TaskGate to the task. The gate blocks promotion past its
+        configured phase until the gate is passed or explicitly overridden by
+        a Layer A agent or a human.
+      tags: [Project — Orchestration]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskGateCreateRequest'
+      responses:
+        '201':
+          description: Gate attached
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskGate'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /projects/{projectId}/tasks/{taskId}/gate/{gateId}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/TaskId'
+      - name: gateId
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: getTaskGate
+      summary: Retrieve a specific gate
+      tags: [Project — Orchestration]
+      responses:
+        '200':
+          description: Gate retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskGate'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    patch:
+      operationId: updateTaskGate
+      summary: Layer A — Update gate state or criteria
+      description: |
+        Allows Layer A agents to transition a gate state (e.g., open → passed),
+        update criteria, or add a human approval override note.
+      tags: [Project — Orchestration]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskGateUpdateRequest'
+      responses:
+        '200':
+          description: Gate updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskGate'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /projects/{projectId}/tasks/{taskId}/decomposition:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - $ref: '#/components/parameters/TaskId'
+    post:
+      operationId: proposeDecomposition
+      summary: Layer A — Submit or override a decomposition proposal
+      description: |
+        Submits a DecompositionProposal for a parent task. The proposal breaks
+        the task into sub-tasks with ordering, dependencies, and assignee assignments.
+        Override mode replaces an existing proposal.
+      tags: [Project — Orchestration]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DecompositionProposalSubmitRequest'
+      responses:
+        '201':
+          description: Decomposition proposal recorded
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DecompositionProposal'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /projects/{projectId}/phase-gates:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      operationId: listProjectPhaseGates
+      summary: List all phase gates for a project
+      description: |
+        Returns all ProjectPhaseGate records — ordered gates that govern
+        when a project can advance between major phases.
+      tags: [Project — Orchestration]
+      responses:
+        '200':
+          description: Phase gate list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectPhaseGateListResponse'
+
+    post:
+      operationId: createProjectPhaseGate
+      summary: Layer A — Define a phase gate for a project
+      description: |
+        Creates a new ProjectPhaseGate. Phase gates are ordered; the platform
+        enforces sequencing by phase index.
+      tags: [Project — Orchestration]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProjectPhaseGateCreateRequest'
+      responses:
+        '201':
+          description: Phase gate created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectPhaseGate'
+
+  /projects/{projectId}/phase-gates/{gateId}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - name: gateId
+        in: path
+        required: true
+        schema:
+          type: string
+    get:
+      operationId: getProjectPhaseGate
+      summary: Retrieve a specific phase gate
+      tags: [Project — Orchestration]
+      responses:
+        '200':
+          description: Phase gate retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectPhaseGate'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+    patch:
+      operationId: updateProjectPhaseGate
+      summary: Layer A — Update a phase gate definition or state
+      description: |
+        Updates phase gate criteria, state, or the pass condition definition.
+        Transitioning state to 'passed' triggers phase advancement.
+      tags: [Project — Orchestration]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProjectPhaseGateUpdateRequest'
+      responses:
+        '200':
+          description: Phase gate updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProjectPhaseGate'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /projects/{projectId}/stream:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      operationId: streamProjectEvents
+      summary: SSE stream — Project event stream
+      description: |
+        Server-Sent Events endpoint delivering real-time project task events
+        to subscribed clients. Events include task state transitions, gate changes,
+        handoff signals, and phase gate transitions. Clients authenticate via JWT
+        and specify optional event type filters via query params.
+      tags: [Project — Orchestration]
+      parameters:
+        - name: events
+          in: query
+          required: false
+          description: Comma-separated list of event types to filter (e.g. task.created,task.promoted)
+          schema:
+            type: string
+      responses:
+        '200':
+          description: SSE event stream
+          content:
+            text/event-stream:
+              schema:
+                $ref: '#/components/schemas/SSEEvent'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /projects/{projectId}/webhooks:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      operationId: listProjectWebhooks
+      summary: List all webhook registrations for a project
+      description: |
+        Returns all WebhookRegistration records for the project.
+        Includes delivery status of recent attempts.
+      tags: [Project — Orchestration]
+      responses:
+        '200':
+          description: Webhook list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookRegistrationListResponse'
+
+    post:
+      operationId: registerProjectWebhook
+      summary: Layer A — Register a webhook for project events
+      description: |
+        Registers a WebhookRegistration: an outbound HTTP POST endpoint that
+        receives signed event payloads for specific event types.
+        Supports filtering by event type and optional secret for payload signature.
+      tags: [Project — Orchestration]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WebhookRegistrationRequest'
+      responses:
+        '201':
+          description: Webhook registered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WebhookRegistration'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /projects/{projectId}/webhooks/{webhookId}:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+      - name: webhookId
+        in: path
+        required: true
+        schema:
+          type: string
+    delete:
+      operationId: deleteProjectWebhook
+      summary: Unregister a webhook
+      description: |
+        Removes the WebhookRegistration. In-flight deliveries complete before
+        the registration is removed.
+      tags: [Project — Orchestration]
+      responses:
+        '204':
+          description: Webhook unregistered
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /projects/{projectId}/handoff-evidence:
+    parameters:
+      - $ref: '#/components/parameters/ProjectId'
+    get:
+      operationId: listProjectHandoffEvidence
+      summary: List handoff evidence records for a project
+      description: |
+        Returns HandoffEvidence records for completed tasks within the project.
+        Supports filtering by taskId and time range.
+      tags: [Project — Orchestration]
+      parameters:
+        - name: taskId
+          in: query
+          required: false
+          schema:
+            type: string
+        - name: startTime
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+        - name: endTime
+          in: query
+          required: false
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Handoff evidence list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HandoffEvidenceListResponse'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  # --------------------------------------------------------------------------
+  # Global task endpoints (Layer A / B — legacy surface, BRD-02 still covers)
+  # --------------------------------------------------------------------------
 
   /tasks:
     post:
@@ -215,8 +860,40 @@ components:
         type: string
         example: t_07d63a0f
 
+    ProjectId:
+      name: projectId
+      in: path
+      required: true
+      description: Project identifier
+      schema:
+        type: string
+        example: p_01h5a0c3
+
   schemas:
-    # --- Metadata / Platform Schemas ---
+    # ==========================================================================
+    # Enumerations
+    # ==========================================================================
+
+    TaskStatus:
+      type: string
+      enum: [todo, in_progress, done, blocked, cancelled]
+
+    Layer:
+      type: string
+      enum: [A, B]
+
+    GateState:
+      type: string
+      enum: [open, passed, blocked]
+
+    ProjectPhase:
+      type: string
+      description: Major project lifecycle phase
+      enum: [planning, decomposition, execution, validation, acceptance, closed]
+
+    # ==========================================================================
+    # Metadata / Platform Schemas
+    # ==========================================================================
 
     HealthResponse:
       type: object
@@ -275,7 +952,633 @@ components:
           type: string
           example: Caller is not authorized to perform this operation
 
-    # --- Task Schemas (placeholder — full shape defined in BRD-02) ---
+    # ==========================================================================
+    # Project Schemas (BRD-02)
+    # ==========================================================================
+
+    Project:
+      type: object
+      required: [id, name, status, phase, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          example: p_01h5a0c3
+        name:
+          type: string
+          example: BRD Authoring System
+        description:
+          type: string
+          nullable: true
+        owner:
+          type: string
+          description: Agent profile name of the project owner
+        status:
+          type: string
+          enum: [active, archived]
+        phase:
+          $ref: '#/components/schemas/ProjectPhase'
+        phaseGates:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProjectPhaseGate'
+        statistics:
+          $ref: '#/components/schemas/ProjectStatistics'
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    ProjectStatistics:
+      type: object
+      properties:
+        totalTasks:
+          type: integer
+        todoTasks:
+          type: integer
+        inProgressTasks:
+          type: integer
+        doneTasks:
+          type: integer
+        blockedTasks:
+          type: integer
+        activeGateCount:
+          type: integer
+
+    ProjectCreateRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          example: BRD Authoring System
+        description:
+          type: string
+        phaseGates:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProjectPhaseGateCreateRequest'
+
+    ProjectUpdateRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        phaseGates:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProjectPhaseGateCreateRequest'
+
+    ProjectListResponse:
+      type: object
+      required: [projects]
+      properties:
+        projects:
+          type: array
+          items:
+            $ref: '#/components/schemas/Project'
+
+    # ==========================================================================
+    # OrchestrationTask Schemas (BRD-02)
+    # ==========================================================================
+
+    OrchestrationTask:
+      type: object
+      required: [id, projectId, title, status, layer, createdAt]
+      properties:
+        id:
+          type: string
+          example: t_07d63a0f
+        projectId:
+          type: string
+          example: p_01h5a0c3
+        title:
+          type: string
+        body:
+          type: string
+          nullable: true
+        status:
+          $ref: '#/components/schemas/TaskStatus'
+        layer:
+          $ref: '#/components/schemas/Layer'
+        assignee:
+          type: string
+          nullable: true
+        parents:
+          type: array
+          items:
+            type: string
+          description: Parent task IDs
+        children:
+          type: array
+          items:
+            type: string
+          description: Child task IDs
+        dependencies:
+          type: array
+          items:
+            $ref: '#/components/schemas/TaskDependency'
+        gates:
+          type: array
+          items:
+            $ref: '#/components/schemas/TaskGate'
+        priority:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        completedAt:
+          type: string
+          format: date-time
+          nullable: true
+        blockedReason:
+          type: string
+          nullable: true
+        metadata:
+          type: object
+          additionalProperties: true
+
+    OrchestrationTaskCreateRequest:
+      type: object
+      required: [title, assignee, layer]
+      properties:
+        title:
+          type: string
+          description: Short task title
+          example: Implement rate limiter
+        body:
+          type: string
+          description: Full task specification
+        assignee:
+          type: string
+          description: Agent profile name
+          example: developer
+        layer:
+          $ref: '#/components/schemas/Layer'
+        parents:
+          type: array
+          items:
+            type: string
+          description: Parent task IDs for dependency edges
+        priority:
+          type: integer
+          description: Higher = picked sooner
+        workspaceKind:
+          type: string
+          enum: [scratch, dir, worktree]
+        tags:
+          type: array
+          items:
+            type: string
+        phaseGate:
+          type: string
+          description: Phase at which this task's gate activates (e.g. validation)
+
+    ProjectTaskListResponse:
+      type: object
+      required: [tasks]
+      properties:
+        tasks:
+          type: array
+          items:
+            $ref: '#/components/schemas/OrchestrationTask'
+
+    # ==========================================================================
+    # TaskDependency Schema (BRD-02)
+    # ==========================================================================
+
+    TaskDependency:
+      type: object
+      required: [id, projectId, sourceTaskId, targetTaskId, type, createdAt]
+      properties:
+        id:
+          type: string
+          example: td_01h7b2f
+        projectId:
+          type: string
+        sourceTaskId:
+          type: string
+          description: Task that has the dependency (dependent)
+        targetTaskId:
+          type: string
+          description: Task that must-complete before source can proceed (dependency)
+        type:
+          type: string
+          enum: [blocks, depends_on, handoff]
+          description: |
+            - blocks: source completion opens target's gate
+            - depends_on: source cannot start until target completes
+            - handoff: source receives explicit signal from target on completion
+        createdAt:
+          type: string
+          format: date-time
+
+    TaskDependencyGraph:
+      type: object
+      required: [taskId, parents, children]
+      properties:
+        taskId:
+          type: string
+        parents:
+          type: array
+          items:
+            $ref: '#/components/schemas/TaskDependency'
+        children:
+          type: array
+          items:
+            $ref: '#/components/schemas/TaskDependency'
+
+    TaskDependencyReplaceRequest:
+      type: object
+      required: [dependencies]
+      properties:
+        dependencies:
+          type: array
+          items:
+            type: object
+            required: [targetTaskId, type]
+            properties:
+              targetTaskId:
+                type: string
+              type:
+                type: string
+                enum: [blocks, depends_on, handoff]
+
+    # ==========================================================================
+    # TaskGate Schema (BRD-02)
+    # ==========================================================================
+
+    TaskGate:
+      type: object
+      required: [id, projectId, taskId, phase, state, createdAt]
+      properties:
+        id:
+          type: string
+          example: tg_01h9x1k
+        projectId:
+          type: string
+        taskId:
+          type: string
+        phase:
+          type: string
+          description: Phase at which this gate activates
+        state:
+          $ref: '#/components/schemas/GateState'
+        criteria:
+          type: array
+          items:
+            type: string
+          description: Human-readable list of gate pass criteria
+        passedAt:
+          type: string
+          format: date-time
+          nullable: true
+        passedBy:
+          type: string
+          nullable: true
+        overrideNote:
+          type: string
+          nullable: true
+          description: Note recorded if gate was passed via Layer A override
+        createdAt:
+          type: string
+          format: date-time
+
+    TaskGateCreateRequest:
+      type: object
+      required: [phase]
+      properties:
+        phase:
+          type: string
+        criteria:
+          type: array
+          items:
+            type: string
+
+    TaskGateUpdateRequest:
+      type: object
+      properties:
+        state:
+          $ref: '#/components/schemas/GateState'
+        criteria:
+          type: array
+          items:
+            type: string
+        overrideNote:
+          type: string
+
+    # ==========================================================================
+    # ProjectPhaseGate Schema (BRD-02)
+    # ==========================================================================
+
+    ProjectPhaseGate:
+      type: object
+      required: [id, projectId, phaseIndex, phase, state, createdAt]
+      properties:
+        id:
+          type: string
+          example: pg_01h3m0r
+        projectId:
+          type: string
+        phaseIndex:
+          type: integer
+          description: Ordering index within the project (0 = first phase gate)
+        phase:
+          $ref: '#/components/schemas/ProjectPhase'
+        state:
+          $ref: '#/components/schemas/GateState'
+        criteria:
+          type: array
+          items:
+            type: string
+        passCondition:
+          type: string
+          description: |
+            Human-readable description of the pass condition.
+            May reference artifact types, approval counts, or automated checks.
+        passedAt:
+          type: string
+          format: date-time
+          nullable: true
+        passedBy:
+          type: string
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+
+    ProjectPhaseGateCreateRequest:
+      type: object
+      required: [phaseIndex, phase]
+      properties:
+        phaseIndex:
+          type: integer
+        phase:
+          $ref: '#/components/schemas/ProjectPhase'
+        criteria:
+          type: array
+          items:
+            type: string
+        passCondition:
+          type: string
+
+    ProjectPhaseGateUpdateRequest:
+      type: object
+      properties:
+        state:
+          $ref: '#/components/schemas/GateState'
+        criteria:
+          type: array
+          items:
+            type: string
+        passCondition:
+          type: string
+        passedBy:
+          type: string
+
+    ProjectPhaseGateListResponse:
+      type: object
+      required: [gates]
+      properties:
+        gates:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProjectPhaseGate'
+
+    # ==========================================================================
+    # DecompositionProposal Schema (BRD-02)
+    # ==========================================================================
+
+    DecompositionProposal:
+      type: object
+      required: [id, projectId, parentTaskId, submitter, state, proposedTasks, createdAt]
+      properties:
+        id:
+          type: string
+          example: dp_01h5f9x
+        projectId:
+          type: string
+        parentTaskId:
+          type: string
+        submitter:
+          type: string
+          description: Agent profile that proposed this decomposition
+        state:
+          type: string
+          enum: [draft, submitted, accepted, rejected]
+        proposedTasks:
+          type: array
+          items:
+            $ref: '#/components/schemas/DecomposedTaskSpec'
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    DecomposedTaskSpec:
+      type: object
+      required: [title, layer, order]
+      properties:
+        title:
+          type: string
+        body:
+          type: string
+          nullable: true
+        layer:
+          $ref: '#/components/schemas/Layer'
+        assignee:
+          type: string
+          nullable: true
+        order:
+          type: integer
+          description: Suggested execution order (topological sort hint)
+        dependencies:
+          type: array
+          items:
+            type: string
+          description: Task title fragments used for dependency resolution
+        tags:
+          type: array
+          items:
+            type: string
+
+    DecompositionProposalSubmitRequest:
+      type: object
+      required: [proposedTasks]
+      properties:
+        submitter:
+          type: string
+          description: Agent profile name
+        proposedTasks:
+          type: array
+          items:
+            $ref: '#/components/schemas/DecomposedTaskSpec'
+        override:
+          type: boolean
+          default: false
+          description: If true, replaces an existing proposal in accepted/rejected state
+
+    # ==========================================================================
+    # WebhookRegistration Schema (BRD-02)
+    # ==========================================================================
+
+    WebhookRegistration:
+      type: object
+      required: [id, projectId, url, events, createdAt]
+      properties:
+        id:
+          type: string
+          example: wh_01h8p2r
+        projectId:
+          type: string
+        url:
+          type: string
+          format: uri
+          description: Destination endpoint for the webhook POST
+        events:
+          type: array
+          items:
+            type: string
+          description: Event types to deliver (e.g. task.created, task.promoted, phase.passed)
+        active:
+          type: boolean
+          default: true
+        secret:
+          type: string
+          description: |
+            HMAC-SHA256 secret used to sign payload bodies.
+            Never returned after initial creation.
+        deliveryStatus:
+          type: object
+          properties:
+            lastAttemptAt:
+              type: string
+              format: date-time
+              nullable: true
+            lastSuccessAt:
+              type: string
+              format: date-time
+              nullable: true
+            failureCount:
+              type: integer
+        createdAt:
+          type: string
+          format: date-time
+
+    WebhookRegistrationRequest:
+      type: object
+      required: [url, events, secret]
+      properties:
+        url:
+          type: string
+          format: uri
+        events:
+          type: array
+          items:
+            type: string
+          minItems: 1
+        secret:
+          type: string
+          description: Registration-time HMAC-SHA256 secret for payload signing. Mandatory for all non-localhost/127.0.0.1 webhook registrations (per ADR-02-003).
+
+    WebhookRegistrationListResponse:
+      type: object
+      required: [webhooks]
+      properties:
+        webhooks:
+          type: array
+          items:
+            $ref: '#/components/schemas/WebhookRegistration'
+
+    # ==========================================================================
+    # HandoffEvidence Schema (BRD-02)
+    # ==========================================================================
+
+    HandoffEvidence:
+      type: object
+      required: [id, projectId, taskId, fromAgent, toAgent, createdAt]
+      properties:
+        id:
+          type: string
+          example: he_01h6w3k
+        projectId:
+          type: string
+        taskId:
+          type: string
+        fromAgent:
+          type: string
+          description: Agent profile completing the task
+        toAgent:
+          type: string
+          description: Agent or role receiving the handoff (nullable for human)
+        summary:
+          type: string
+          description: Human-readable handoff summary
+        metadata:
+          type: object
+          additionalProperties: true
+        createdAt:
+          type: string
+          format: date-time
+
+    HandoffEvidenceListResponse:
+      type: object
+      required: [records]
+      properties:
+        records:
+          type: array
+          items:
+            $ref: '#/components/schemas/HandoffEvidence'
+
+    # ==========================================================================
+    # SSE Event Schema (BRD-02)
+    # ==========================================================================
+
+    SSEEvent:
+      type: object
+      required: [event, data]
+      properties:
+        event:
+          type: string
+          enum:
+            - task.created
+            - task.updated
+            - task.promoted
+            - task.completed
+            - task.blocked
+            - task.cancelled
+            - gate.created
+            - gate.passed
+            - gate.blocked
+            - phase.passed
+            - project.created
+            - project.archived
+        data:
+          type: object
+          additionalProperties: true
+        timestamp:
+          type: string
+          format: date-time
+        projectId:
+          type: string
+        taskId:
+          type: string
+          nullable: true
+        gateId:
+          type: string
+          nullable: true
+
+    # ==========================================================================
+    # Legacy / Common Schemas (retained for backwards compatibility)
+    # ==========================================================================
 
     TaskCreateRequest:
       type: object
@@ -423,6 +1726,27 @@ components:
           schema:
             $ref: '#/components/schemas/Error'
 
+    Unauthorized:
+      description: Missing or invalid authentication token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    Forbidden:
+      description: Caller lacks required authorization
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+    BadRequest:
+      description: Request validation failed
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
   securitySchemes:
     BearerAuth:
       type: http
@@ -434,6 +1758,7 @@ components:
         Layer B agents receive tokens scoped to their assigned task.
 
 # ----------------------------------------------------------------------
+<<<<<<< Updated upstream
 # BRD-03 — Client Portal BFF Endpoints
 # ----------------------------------------------------------------------
 # BRD-03 is primarily a BFF frontend. The backend already owns the task,
@@ -975,11 +2300,14 @@ components:
 
 # ----------------------------------------------------------------------
 # PHASE 0 CONTRACT NOTES
+=======
+# BRD-02 CONTRACT NOTES
+>>>>>>> Stashed changes
 # ----------------------------------------------------------------------
 #
-# This OpenAPI contract is a PLACEHOLDER.  The following are NOT defined
-# and are BLOCKED on their respective BRDs:
+# This document now covers BRD-02 project-scoped orchestration:
 #
+<<<<<<< Updated upstream
 #   BRD-01 (App Shell)         → actual server URL, auth integration, CORS
 #   BRD-02 (Orchestration)     → /tasks dependency graph, gate promotion rules
 #   BRD-02 (Orchestration)     → /tasks dependency graph, gate promotion rules
@@ -989,19 +2317,43 @@ components:
 #   BRD-06 (Agent Memory)      → memory store read/write endpoints
 #   BRD-07 (BRD Authoring)     → BRD create/update API
 #   BRD-08 to BRD-21          → domain-specific endpoints
+=======
+#   Schemas added:
+#     - Project                     → top-level project container
+#     - OrchestrationTask           → project-scoped task with dependency field
+#     - TaskDependency              → explicit directed dependency edges
+#     - TaskGate                    → per-task quality gate
+#     - ProjectPhaseGate           → project-level phase transition gate
+#     - DecompositionProposal       → task decomposition proposal record
+#     - WebhookRegistration        → outbound event webhook subscription
+#     - HandoffEvidence            → task completion signal with metadata
+>>>>>>> Stashed changes
 #
-# Do NOT add path items for any of the above without their BRD first.
-#
-# Layer A vs Layer B enforcement:
-#   - Layer A endpoints (decompose, promote, gate-approve) reject Layer B tokens
-#   - Layer B endpoints (complete, deliver) are scoped to the caller's task
-#   - This separation is contractual, enforced by the auth layer
+#   Endpoints added:
+#     - GET/POST /projects
+#     - GET/PATCH/DELETE /projects/{projectId}
+#     - GET/POST /projects/{projectId}/tasks
+#     - GET /projects/{projectId}/tasks/{taskId}
+#     - POST /projects/{projectId}/tasks/{taskId}/promote
+#     - POST /projects/{projectId}/tasks/{taskId}/complete
+#     - POST /projects/{projectId}/tasks/{taskId}/block
+#     - GET/PUT /projects/{projectId}/tasks/{taskId}/dependencies
+#     - POST /projects/{projectId}/tasks/{taskId}/decomposition
+#     - POST /projects/{projectId}/tasks/{taskId}/gate
+#     - GET/PATCH /projects/{projectId}/tasks/{taskId}/gate/{gateId}
+#     - GET/POST /projects/{projectId}/phase-gates
+#     - GET/PATCH /projects/{projectId}/phase-gates/{gateId}
+#     - GET /projects/{projectId}/stream     (SSE)
+#     - GET/POST /projects/{projectId}/webhooks
+#     - DELETE /projects/{projectId}/webhooks/{webhookId}
+#     - GET /projects/{projectId}/handoff-evidence
 #
 # Feature flag key reference (from specs/feature-flags.md):
-#   kanban-orchestrator   → enables /tasks endpoints
+#   kanban-orchestrator   → enables /tasks and /projects endpoints
 #   layer-a-agents        → enables Layer A agent operations
 #   layer-b-agents        → enables Layer B agent operations
 #   human-gates           → enables gate checkpoint enforcement
+<<<<<<< Updated upstream
 #   client-portal         → enables /client-portal/* endpoints (BRD-03)
 
 # ADR-03-003 / OQ-03-002 contract parity notes:
@@ -1010,4 +2362,7 @@ components:
 #     field name and value scanning per ADR-03-003 forbidden fields list
 #   SSE envelope fields (actorId, actorRole, eventId, schemaVersion, parentTaskId, gateId) —
 #     stripped by BFF before client SSE delivery per ADR-03-003
+=======
+#   project-scoped        → enables project-scoped orchestration paths
+>>>>>>> Stashed changes
 #
