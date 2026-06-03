@@ -760,8 +760,6 @@ Event emission is gated by the following feature flags (from `specs/feature-flag
 
 ---
 
-=======
->>>>>>> Stashed changes
 ## Audit Trail Contract
 
 Every event in this system is an **immutable audit record**. The event store is append-only. No event may be retracted, rewritten, or reordered after emission.
