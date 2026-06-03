@@ -83,10 +83,8 @@ jobs:
     runs-on: ubuntu-latest
     # Run if backend has source files; always run on push (main branch) after phase0 passes.
     if: |
-      always() && (
-        github.event_name == 'push' ||
-        needs.phase0-checks.result == 'success'
-      )
+      github.event_name == 'push' ||
+      needs.phase0-checks.result == 'success'
     needs: phase0-checks
     defaults:
       run:
@@ -118,10 +116,8 @@ jobs:
     needs: phase0-checks
     # Run if frontend has package.json; always run on push (main branch) after phase0 passes.
     if: |
-      always() && (
-        github.event_name == 'push' ||
-        needs.phase0-checks.result == 'success'
-      )
+      github.event_name == 'push' ||
+      needs.phase0-checks.result == 'success'
     defaults:
       run:
         working-directory: frontend
@@ -176,7 +172,7 @@ jobs:
     needs: phase0-checks
     # Run after phase0 static checks pass
     if: |
-      always() &&
+      github.event_name == 'push' ||
       needs.phase0-checks.result == 'success'
     steps:
       - uses: actions/checkout@v4

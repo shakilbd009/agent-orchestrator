@@ -576,7 +576,6 @@ The following are intentionally **not defined** in BRD-02 and are blocked on the
 
 ---
 
-<<<<<<< Updated upstream
 ## BRD-03 — Client Portal Events
 
 *BRD-03 Client Portal introduces client-facing events for approvals, publications, comments, and access enforcement. These events are emitted by the BFF layer and by the platform on behalf of client actions. SSE is the primary transport for live portal updates.*
