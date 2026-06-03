@@ -14,6 +14,7 @@ import (
 	"github.com/agent-orchestrator/backend/internal/event"
 	"github.com/agent-orchestrator/backend/internal/handler"
 	appmiddleware "github.com/agent-orchestrator/backend/internal/middleware"
+	"github.com/agent-orchestrator/backend/internal/observability"
 	"github.com/agent-orchestrator/backend/internal/repository"
 	"github.com/agent-orchestrator/backend/internal/service"
 )
@@ -83,6 +84,21 @@ func main() {
 		// Webhook queue is always available (in-process/DB-backed)
 		return true
 	})
+
+	// Initialize observability for client portal
+	cpMetrics := observability.NewMetrics()
+	cpLogger := observability.NewLogger()
+
+	// Initialize client portal repositories
+	cpProjectRepo := repository.NewClientPortalProjectRepository(dbPool)
+	cpApprovalRepo := repository.NewClientPortalApprovalRepository(dbPool)
+	cpCommentRepo := repository.NewCommentRepository(dbPool)
+
+	// Initialize client portal service
+	cpSvc := service.NewClientPortalService(cpProjectRepo, cpApprovalRepo, cpCommentRepo, cpLogger, cpMetrics)
+
+	// Initialize client portal handler
+	cpHandler := handler.NewClientPortalHandler(cpSvc, cpMetrics, cpLogger)
 
 	// Initialize handlers
 	h := handler.NewHandlers(projectSvc, taskSvc, gateSvc, decompSvc, webhookSvc, readySvc, eventSvc, projectRepo)
@@ -156,6 +172,16 @@ func main() {
 	projects.POST("/:projectId/webhooks", h.RegisterProjectWebhook)
 	projects.DELETE("/:projectId/webhooks/:webhookId", h.DeleteProjectWebhook)
 
+	// Client portal endpoints (BRD-03)
+	cp := e.Group("/client-portal")
+	cp.Use(appmiddleware.ActorMiddleware())
+	cp.Use(appmiddleware.RequireFeatureGate("client-portal"))
+	cp.GET("/portfolio", cpHandler.GetPortfolio)
+	cp.GET("/projects/:projectId", cpHandler.GetProjectDetail)
+	cp.GET("/approvals", cpHandler.GetApprovalInbox)
+	cp.POST("/approvals/:approvalId/decide", cpHandler.DecideApproval)
+	cp.GET("/search", cpHandler.Search)
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "3001"
@@ -184,6 +210,9 @@ func loadFeatureFlags() {
 	}
 	if os.Getenv("FF_ENABLE_AUDIT_TRAIL") == "true" {
 		appmiddleware.FeatureFlags.AuditTrail = true
+	}
+	if os.Getenv("FF_ENABLE_CLIENT_PORTAL") == "true" {
+		appmiddleware.FeatureFlags.ClientPortal = true
 	}
 }
 
