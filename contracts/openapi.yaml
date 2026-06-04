@@ -1758,7 +1758,6 @@ components:
         Layer B agents receive tokens scoped to their assigned task.
 
 # ----------------------------------------------------------------------
-<<<<<<< Updated upstream
 # BRD-03 — Client Portal BFF Endpoints
 # ----------------------------------------------------------------------
 # BRD-03 is primarily a BFF frontend. The backend already owns the task,
@@ -2300,16 +2299,12 @@ components:
 
 # ----------------------------------------------------------------------
 # PHASE 0 CONTRACT NOTES
-=======
 # BRD-02 CONTRACT NOTES
->>>>>>> Stashed changes
 # ----------------------------------------------------------------------
 #
 # This document now covers BRD-02 project-scoped orchestration:
 #
-<<<<<<< Updated upstream
 #   BRD-01 (App Shell)         → actual server URL, auth integration, CORS
-#   BRD-02 (Orchestration)     → /tasks dependency graph, gate promotion rules
 #   BRD-02 (Orchestration)     → /tasks dependency graph, gate promotion rules
 #   BRD-03 (Client Portal)     → BFF read endpoints defined below
 #   BRD-04 (Agent Dashboard)   → agent-facing task APIs
@@ -2317,7 +2312,7 @@ components:
 #   BRD-06 (Agent Memory)      → memory store read/write endpoints
 #   BRD-07 (BRD Authoring)     → BRD create/update API
 #   BRD-08 to BRD-21          → domain-specific endpoints
-=======
+#
 #   Schemas added:
 #     - Project                     → top-level project container
 #     - OrchestrationTask           → project-scoped task with dependency field
@@ -2327,7 +2322,6 @@ components:
 #     - DecompositionProposal       → task decomposition proposal record
 #     - WebhookRegistration        → outbound event webhook subscription
 #     - HandoffEvidence            → task completion signal with metadata
->>>>>>> Stashed changes
 #
 #   Endpoints added:
 #     - GET/POST /projects
@@ -2353,16 +2347,13 @@ components:
 #   layer-a-agents        → enables Layer A agent operations
 #   layer-b-agents        → enables Layer B agent operations
 #   human-gates           → enables gate checkpoint enforcement
-<<<<<<< Updated upstream
 #   client-portal         → enables /client-portal/* endpoints (BRD-03)
-
+#
 # ADR-03-003 / OQ-03-002 contract parity notes:
 #   Task.layer (enum A|B) — internal-only field; BFF must strip from client-visible responses
 #   Task.metadata (additionalProperties: true) — client-visible publication requires metadata
 #     field name and value scanning per ADR-03-003 forbidden fields list
 #   SSE envelope fields (actorId, actorRole, eventId, schemaVersion, parentTaskId, gateId) —
 #     stripped by BFF before client SSE delivery per ADR-03-003
-=======
 #   project-scoped        → enables project-scoped orchestration paths
->>>>>>> Stashed changes
 #

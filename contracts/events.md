@@ -576,7 +576,6 @@ The following are intentionally **not defined** in BRD-02 and are blocked on the
 
 ---
 
-<<<<<<< Updated upstream
 ## BRD-03 — Client Portal Events
 
 *BRD-03 Client Portal introduces client-facing events for approvals, publications, comments, and access enforcement. These events are emitted by the BFF layer and by the platform on behalf of client actions. SSE is the primary transport for live portal updates.*
@@ -760,8 +759,6 @@ Event emission is gated by the following feature flags (from `specs/feature-flag
 
 ---
 
-=======
->>>>>>> Stashed changes
 ## Audit Trail Contract
 
 Every event in this system is an **immutable audit record**. The event store is append-only. No event may be retracted, rewritten, or reordered after emission.

@@ -27,6 +27,7 @@ var FeatureFlags = models.FeatureFlags{
 	LayerBAgents:          false,
 	HumanGates:            false,
 	AuditTrail:            false,
+	ClientPortal:          false,
 }
 
 // RequireFeatureGate returns a middleware that blocks requests when the flag is disabled.
@@ -46,6 +47,8 @@ func RequireFeatureGate(flagName string) echo.MiddlewareFunc {
 				enabled = FeatureFlags.HumanGates
 			case "audit-trail":
 				enabled = FeatureFlags.AuditTrail
+			case "client-portal":
+				enabled = FeatureFlags.ClientPortal
 			}
 			if !enabled {
 				return c.JSON(http.StatusForbidden, models.Error{

@@ -197,6 +197,7 @@ type FeatureFlags struct {
 	LayerBAgents          bool `json:"layer-b-agents"`
 	HumanGates            bool `json:"human-gates"`
 	AuditTrail            bool `json:"audit-trail"`
+	ClientPortal          bool `json:"client-portal"`
 }
 
 // OrchestrationTaskCreateRequest is the request body for creating a task.
