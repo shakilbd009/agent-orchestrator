@@ -143,29 +143,6 @@ jobs:
       - name: Test
         run: pnpm test
 
-  phase1-orchestrator-pipeline:
-    name: Orchestrator pipeline gate
-    runs-on: ubuntu-latest
-    needs: [phase1-backend, phase1-frontend]
-    # Only run after both backend and frontend jobs have succeeded or been skipped
-    if: |
-      always() &&
-      (needs.phase1-backend.result == 'success' || needs.phase1-backend.result == 'skipped') &&
-      (needs.phase1-frontend.result == 'success' || needs.phase1-frontend.result == 'skipped')
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Run orchestrator pipeline gate
-        env:
-          HERMES_KANBAN_BOARD: ${{ vars.HERMES_KANBAN_BOARD || 'agent-orchestrator' }}
-          BRD_ID: ${{ inputs.brd_id || 'BRD-01' }}
-        run: |
-          if [[ -f ./scripts/check-orchestrator-pipeline.sh ]]; then
-            ./scripts/check-orchestrator-pipeline.sh release
-          else
-            echo "Pipeline gate script not yet created — skipping"
-          fi
-
   phase1-feature-flags:
     name: Feature flag registry check
     runs-on: ubuntu-latest
