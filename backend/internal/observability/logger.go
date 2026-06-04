@@ -50,12 +50,14 @@ func (l *Logger) ProjectViewed(ctx context.Context, principalID, projectID strin
 }
 
 // approvalSubmitted emits client_portal.approval.submitted.
-func (l *Logger) ApprovalSubmitted(ctx context.Context, projectID, itemID, outcome, actorID string) {
+// timestamp reflects when the approval outcome was recorded.
+func (l *Logger) ApprovalSubmitted(ctx context.Context, projectID, itemID, outcome, actorID string, timestamp time.Time) {
 	l.log(ctx, "client_portal.approval.submitted",
 		slog.String("project_id", projectID),
 		slog.String("item_id", itemID),
 		slog.String("outcome", outcome),
-		slog.String("actor_id", actorID))
+		slog.String("actor_id", actorID),
+		slog.Time("timestamp", timestamp))
 }
 
 // approvalNeedMoreInformation emits client_portal.approval.need_more_information.
@@ -67,11 +69,13 @@ func (l *Logger) ApprovalNeedMoreInformation(ctx context.Context, itemID, actorI
 }
 
 // commentCreated emits client_portal.comment.created.
-func (l *Logger) CommentCreated(ctx context.Context, projectID, relatedItemID, authorID string) {
+// timestamp reflects when the comment was created.
+func (l *Logger) CommentCreated(ctx context.Context, projectID, relatedItemID, authorID string, timestamp time.Time) {
 	l.log(ctx, "client_portal.comment.created",
 		slog.String("project_id", projectID),
 		slog.String("related_item_id", relatedItemID),
-		slog.String("author_id", authorID))
+		slog.String("author_id", authorID),
+		slog.Time("timestamp", timestamp))
 }
 
 // commentEdited emits client_portal.comment.edited.

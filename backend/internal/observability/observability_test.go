@@ -240,9 +240,9 @@ func TestLogger_BasicEmission(t *testing.T) {
 	// Smoke test: no panics on any log method
 	l.PortfolioViewed(ctx, "principal-1", 3)
 	l.ProjectViewed(ctx, "principal-1", "proj-a")
-	l.ApprovalSubmitted(ctx, "proj-a", "item-1", "approve", "principal-1")
+	l.ApprovalSubmitted(ctx, "proj-a", "item-1", "approve", "principal-1", time.Now())
 	l.ApprovalNeedMoreInformation(ctx, "item-2", "principal-1", time.Now())
-	l.CommentCreated(ctx, "proj-a", "item-3", "principal-1")
+	l.CommentCreated(ctx, "proj-a", "item-3", "principal-1", time.Now())
 	l.CommentEdited(ctx, "proj-a", "comment-1", "principal-1", time.Now())
 	l.CommentDeleted(ctx, "proj-a", "comment-2", "principal-1", time.Now())
 	l.ItemPublished(ctx, "proj-a", "item-4", "task", "actor-1", "passed")

@@ -350,12 +350,12 @@ func (r *ClientPortalApprovalRepository) ApprovalPrincipalHasAccess(ctx context.
 	return count > 0
 }
 
-// RecordDecision records a client approval decision and returns the updated item.
-func (r *ClientPortalApprovalRepository) RecordDecision(ctx context.Context, approvalID, principal string, req models.ApprovalDecisionRequest) (*models.ClientApprovalItem, error) {
+// RecordDecision records a client approval decision and returns the updated item and project ID.
+func (r *ClientPortalApprovalRepository) RecordDecision(ctx context.Context, approvalID, principal string, req models.ApprovalDecisionRequest) (*models.ClientApprovalItem, string, error) {
 	var projectID, taskID, currentState string
 	row := r.db.QueryRow(ctx, `SELECT project_id, task_id, state FROM task_gates WHERE id=$1`, approvalID)
 	if err := row.Scan(&projectID, &taskID, &currentState); err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	// Map client outcome to internal gate state
@@ -371,7 +371,7 @@ func (r *ClientPortalApprovalRepository) RecordDecision(ctx context.Context, app
 
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
-		return nil, err
+		return nil, projectID, err
 	}
 	defer tx.Rollback(ctx)
 
@@ -379,7 +379,7 @@ func (r *ClientPortalApprovalRepository) RecordDecision(ctx context.Context, app
 		UPDATE task_gates SET state=$2, passed_by=$3, passed_at=NOW()
 		WHERE id=$1`, approvalID, newState, principal)
 	if err != nil {
-		return nil, err
+		return nil, projectID, err
 	}
 
 	// Emit audit event
@@ -390,11 +390,11 @@ func (r *ClientPortalApprovalRepository) RecordDecision(ctx context.Context, app
 		eventID, projectID, principal, taskID, approvalID,
 		`{"outcome":"`+req.Outcome+`","comment":`+ptrJSON(req.Comment)+`}`)
 	if err != nil {
-		return nil, err
+		return nil, projectID, err
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return nil, err
+		return nil, projectID, err
 	}
 
 	return &models.ClientApprovalItem{
@@ -403,7 +403,7 @@ func (r *ClientPortalApprovalRepository) RecordDecision(ctx context.Context, app
 		Outcome:    req.Outcome,
 		CreatedAt:  time.Now(),
 		Overdue:    false,
-	}, nil
+	}, projectID, nil
 }
 
 func ptrJSON(s *string) string {

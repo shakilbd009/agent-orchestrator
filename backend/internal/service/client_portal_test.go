@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/agent-orchestrator/backend/internal/models"
+	"github.com/agent-orchestrator/backend/internal/observability"
 )
 
 // --- mock implementations ---
@@ -26,6 +27,17 @@ func newTestClientPortalService(
 	commentRepo ClientPortalCommentRepo,
 ) *ClientPortalService {
 	return NewClientPortalService(projectRepo, approvalRepo, commentRepo, nil, nil)
+}
+
+// newTestClientPortalServiceWithObservability creates a ClientPortalService with real observability.
+func newTestClientPortalServiceWithObservability(
+	projectRepo ClientPortalProjectRepo,
+	approvalRepo ClientPortalApprovalRepo,
+	commentRepo ClientPortalCommentRepo,
+	logger *observability.Logger,
+	metrics *observability.Metrics,
+) *ClientPortalService {
+	return NewClientPortalService(projectRepo, approvalRepo, commentRepo, logger, metrics)
 }
 
 func (m *mockClientPortalProjectRepo) ListAccessibleProjects(ctx context.Context, principal string) ([]ClientPortalProject, error) {
@@ -61,7 +73,7 @@ type mockClientPortalApprovalRepo struct {
 	listProjectApprovalsFn       func(ctx context.Context, projectID, principal string) ([]models.ClientApprovalItem, error)
 	listAccessibleApprovalsFn    func(ctx context.Context, principal string) ([]models.ClientApprovalItem, error)
 	approvalPrincipalHasAccessFn func(ctx context.Context, approvalID, principal string) bool
-	recordDecisionFn             func(ctx context.Context, approvalID, principal string, req models.ApprovalDecisionRequest) (*models.ClientApprovalItem, error)
+	recordDecisionFn             func(ctx context.Context, approvalID, principal string, req models.ApprovalDecisionRequest) (*models.ClientApprovalItem, string, error)
 }
 
 func (m *mockClientPortalApprovalRepo) CountPendingApprovals(ctx context.Context, projectID, principal string) (pending int, overdue int) {
@@ -92,15 +104,18 @@ func (m *mockClientPortalApprovalRepo) ApprovalPrincipalHasAccess(ctx context.Co
 	return false
 }
 
-func (m *mockClientPortalApprovalRepo) RecordDecision(ctx context.Context, approvalID, principal string, req models.ApprovalDecisionRequest) (*models.ClientApprovalItem, error) {
+func (m *mockClientPortalApprovalRepo) RecordDecision(ctx context.Context, approvalID, principal string, req models.ApprovalDecisionRequest) (*models.ClientApprovalItem, string, error) {
 	if m.recordDecisionFn != nil {
 		return m.recordDecisionFn(ctx, approvalID, principal, req)
 	}
-	return nil, nil
+	return nil, "", nil
 }
 
 type mockClientPortalCommentRepo struct {
 	listByProjectAndItemFn func(ctx context.Context, projectID, itemID string) ([]models.ClientComment, error)
+	createCommentFn        func(ctx context.Context, c *models.ClientComment) error
+	editCommentFn          func(ctx context.Context, commentID, authorID, newBody string) (*models.ClientComment, error)
+	deleteCommentFn        func(ctx context.Context, commentID, authorID string) (bool, error)
 }
 
 func (m *mockClientPortalCommentRepo) ListByProjectAndItem(ctx context.Context, projectID, itemID string) ([]models.ClientComment, error) {
@@ -108,6 +123,27 @@ func (m *mockClientPortalCommentRepo) ListByProjectAndItem(ctx context.Context, 
 		return m.listByProjectAndItemFn(ctx, projectID, itemID)
 	}
 	return nil, nil
+}
+
+func (m *mockClientPortalCommentRepo) CreateComment(ctx context.Context, c *models.ClientComment) error {
+	if m.createCommentFn != nil {
+		return m.createCommentFn(ctx, c)
+	}
+	return nil
+}
+
+func (m *mockClientPortalCommentRepo) EditComment(ctx context.Context, commentID, authorID, newBody string) (*models.ClientComment, error) {
+	if m.editCommentFn != nil {
+		return m.editCommentFn(ctx, commentID, authorID, newBody)
+	}
+	return nil, nil
+}
+
+func (m *mockClientPortalCommentRepo) DeleteComment(ctx context.Context, commentID, authorID string) (bool, error) {
+	if m.deleteCommentFn != nil {
+		return m.deleteCommentFn(ctx, commentID, authorID)
+	}
+	return false, nil
 }
 
 // --- tests ---
@@ -262,8 +298,8 @@ func TestDecideApproval_ApproveWithoutCommentOk(t *testing.T) {
 		approvalPrincipalHasAccessFn: func(ctx context.Context, approvalID, principal string) bool {
 			return true
 		},
-		recordDecisionFn: func(ctx context.Context, approvalID, principal string, req models.ApprovalDecisionRequest) (*models.ClientApprovalItem, error) {
-			return &updatedItem, nil
+		recordDecisionFn: func(ctx context.Context, approvalID, principal string, req models.ApprovalDecisionRequest) (*models.ClientApprovalItem, string, error) {
+			return &updatedItem, "proj-1", nil
 		},
 	}
 	svc := newTestClientPortalService(nil, approvalRepo, nil)
@@ -453,5 +489,219 @@ func TestBuildBoardColumns_Empty(t *testing.T) {
 		if len(col.Tasks) != 0 {
 			t.Errorf("expected 0 tasks in %s column, got %d", col.Status, len(col.Tasks))
 		}
+	}
+}
+
+// --- wiring tests: verify instrumentation is emitted through service call paths ---
+
+func TestGetApprovalInbox_WiresMetrics(t *testing.T) {
+	oldItem := models.ClientApprovalItem{
+		ID:        "a1",
+		Title:     "Old approval",
+		Outcome:   "pending",
+		CreatedAt: time.Now().Add(-48 * time.Hour),
+	}
+	recentItem := models.ClientApprovalItem{
+		ID:        "a2",
+		Title:     "Recent approval",
+		Outcome:   "pending",
+		CreatedAt: time.Now().Add(-1 * time.Hour),
+	}
+	approvalRepo := &mockClientPortalApprovalRepo{
+		listAccessibleApprovalsFn: func(ctx context.Context, principal string) ([]models.ClientApprovalItem, error) {
+			return []models.ClientApprovalItem{oldItem, recentItem}, nil
+		},
+	}
+	metrics := observability.NewMetrics()
+	logger := observability.NewLogger()
+	svc := newTestClientPortalServiceWithObservability(nil, approvalRepo, nil, logger, metrics)
+
+	_, err := svc.GetApprovalInbox(context.Background(), "client-1")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	snap := metrics.Snapshot()
+	if snap.PendingApprovalsCurrent != 2 {
+		t.Errorf("PendingApprovalsCurrent: expected 2, got %d", snap.PendingApprovalsCurrent)
+	}
+	if snap.OverdueDecisionsCurrent != 1 {
+		t.Errorf("OverdueDecisionsCurrent: expected 1, got %d", snap.OverdueDecisionsCurrent)
+	}
+	if snap.OldestPendingDecisionAgeMs == 0 {
+		t.Error("OldestPendingDecisionAgeMs: expected non-zero")
+	}
+	// GetApprovalInbox records oldest_pending_decision_age_ms as a gauge, but
+	// MUST NOT record decision_turnaround (histogram) — turnaround samples are
+	// only recorded on decision completion (actionable-to-outcome duration).
+	if len(snap.DecisionTurnaroundMs) != 0 {
+		t.Errorf("DecisionTurnaroundMs: expected 0 samples on read path, got %d", len(snap.DecisionTurnaroundMs))
+	}
+}
+
+func TestDecideApproval_WiresApprovalSubmittedLog(t *testing.T) {
+	updatedItem := models.ClientApprovalItem{ID: "a1", Title: "Approve me", Outcome: "approved"}
+	approvalRepo := &mockClientPortalApprovalRepo{
+		approvalPrincipalHasAccessFn: func(ctx context.Context, approvalID, principal string) bool {
+			return true
+		},
+		recordDecisionFn: func(ctx context.Context, approvalID, principal string, req models.ApprovalDecisionRequest) (*models.ClientApprovalItem, string, error) {
+			return &updatedItem, "proj-42", nil
+		},
+	}
+	metrics := observability.NewMetrics()
+	logger := observability.NewLogger()
+	svc := newTestClientPortalServiceWithObservability(nil, approvalRepo, nil, logger, metrics)
+
+	result, err := svc.DecideApproval(context.Background(), "a1", "client-1", models.ApprovalDecisionRequest{
+		Outcome: "approve",
+	})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success=true, got false")
+	}
+	// Verify decision outcome metric was recorded (approve counter incremented)
+	snap := metrics.Snapshot()
+	if snap.DecisionOutcome["approve"] != 1 {
+		t.Errorf("DecisionOutcome[approve]: expected 1, got %d", snap.DecisionOutcome["approve"])
+	}
+}
+
+func TestDecideApproval_WiresNeedMoreInformationGauge(t *testing.T) {
+	updatedItem := models.ClientApprovalItem{ID: "a1", Title: "NMI", Outcome: "need_more_information"}
+	comment := "please clarify"
+	approvalRepo := &mockClientPortalApprovalRepo{
+		approvalPrincipalHasAccessFn: func(ctx context.Context, approvalID, principal string) bool {
+			return true
+		},
+		recordDecisionFn: func(ctx context.Context, approvalID, principal string, req models.ApprovalDecisionRequest) (*models.ClientApprovalItem, string, error) {
+			return &updatedItem, "proj-1", nil
+		},
+	}
+	metrics := observability.NewMetrics()
+	logger := observability.NewLogger()
+	svc := newTestClientPortalServiceWithObservability(nil, approvalRepo, nil, logger, metrics)
+
+	result, err := svc.DecideApproval(context.Background(), "a1", "client-1", models.ApprovalDecisionRequest{
+		Outcome: "need_more_information",
+		Comment: &comment,
+	})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success=true")
+	}
+	snap := metrics.Snapshot()
+	if snap.NeedMoreInformationCurrent == 0 {
+		t.Error("NeedMoreInformationCurrent: expected non-zero after NMI decision")
+	}
+	// RecordDecisionOutcome is called for every outcome
+	if snap.DecisionOutcome["need_more_information"] != 1 {
+		t.Errorf("DecisionOutcome[need_more_information]: expected 1, got %d", snap.DecisionOutcome["need_more_information"])
+	}
+}
+
+func TestDecideApproval_WiresRequestedChangesGauge(t *testing.T) {
+	updatedItem := models.ClientApprovalItem{ID: "a1", Title: "RC", Outcome: "request_changes"}
+	comment := "please rework"
+	approvalRepo := &mockClientPortalApprovalRepo{
+		approvalPrincipalHasAccessFn: func(ctx context.Context, approvalID, principal string) bool {
+			return true
+		},
+		recordDecisionFn: func(ctx context.Context, approvalID, principal string, req models.ApprovalDecisionRequest) (*models.ClientApprovalItem, string, error) {
+			return &updatedItem, "proj-1", nil
+		},
+	}
+	metrics := observability.NewMetrics()
+	logger := observability.NewLogger()
+	svc := newTestClientPortalServiceWithObservability(nil, approvalRepo, nil, logger, metrics)
+
+	result, err := svc.DecideApproval(context.Background(), "a1", "client-1", models.ApprovalDecisionRequest{
+		Outcome: "request_changes",
+		Comment: &comment,
+	})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success=true")
+	}
+	// Verify requested-changes gauge was recorded
+	if snap := metrics.Snapshot(); snap.RequestedChangesCurrent == 0 {
+		t.Error("RequestedChangesCurrent: expected non-zero after request_changes decision")
+	}
+}
+
+func TestCreateComment_WiresMetrics(t *testing.T) {
+	commentRepo := &mockClientPortalCommentRepo{
+		createCommentFn: func(ctx context.Context, c *models.ClientComment) error {
+			return nil
+		},
+	}
+	metrics := observability.NewMetrics()
+	logger := observability.NewLogger()
+	svc := newTestClientPortalServiceWithObservability(nil, nil, commentRepo, logger, metrics)
+
+	err := svc.CreateComment(context.Background(), &models.ClientComment{
+		ID:            "cmt_test",
+		ProjectID:     "proj-1",
+		RelatedItemID: "item-1",
+		AuthorName:    "client-1",
+		Body:          "test comment",
+		CreatedAt:     time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if snap := metrics.Snapshot(); snap.CommentCreatedTotal != 1 {
+		t.Errorf("CommentCreatedTotal: expected 1, got %d", snap.CommentCreatedTotal)
+	}
+}
+
+func TestEditComment_WiresMetrics(t *testing.T) {
+	commentRepo := &mockClientPortalCommentRepo{
+		editCommentFn: func(ctx context.Context, commentID, authorID, newBody string) (*models.ClientComment, error) {
+			return &models.ClientComment{
+				ID:        commentID,
+				ProjectID: "proj-1",
+				Body:      newBody,
+			}, nil
+		},
+	}
+	metrics := observability.NewMetrics()
+	logger := observability.NewLogger()
+	svc := newTestClientPortalServiceWithObservability(nil, nil, commentRepo, logger, metrics)
+
+	_, err := svc.EditComment(context.Background(), "cmt_test", "client-1", "updated body")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if snap := metrics.Snapshot(); snap.CommentEditedTotal != 1 {
+		t.Errorf("CommentEditedTotal: expected 1, got %d", snap.CommentEditedTotal)
+	}
+}
+
+func TestDeleteComment_WiresMetrics(t *testing.T) {
+	commentRepo := &mockClientPortalCommentRepo{
+		deleteCommentFn: func(ctx context.Context, commentID, authorID string) (bool, error) {
+			return true, nil
+		},
+	}
+	metrics := observability.NewMetrics()
+	logger := observability.NewLogger()
+	svc := newTestClientPortalServiceWithObservability(nil, nil, commentRepo, logger, metrics)
+
+	deleted, err := svc.DeleteComment(context.Background(), "cmt_test", "client-1")
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if !deleted {
+		t.Error("expected deleted=true")
+	}
+	if snap := metrics.Snapshot(); snap.CommentDeletedTotal != 1 {
+		t.Errorf("CommentDeletedTotal: expected 1, got %d", snap.CommentDeletedTotal)
 	}
 }

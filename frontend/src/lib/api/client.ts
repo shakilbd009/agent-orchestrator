@@ -1,6 +1,7 @@
-// BRD-02 — API client
+// BRD-02 / BRD-03 — API client
 // Base URL: VITE_API_BASE_URL ?? 'http://localhost:3001'
-// All project-scoped endpoints require Authorization: Bearer <token>
+// BRD-02: project, task, gate, webhook, handoff, health, status
+// BRD-03: /client-portal/* endpoints (portfolio, project detail, approval inbox, search)
 
 import type {
   Project,
@@ -32,6 +33,12 @@ import type {
   PlatformStatus,
   EventEnvelope,
   ApiError,
+  ClientPortfolio,
+  ClientProjectDetail,
+  ClientApprovalInbox,
+  ApprovalDecisionRequest,
+  ApprovalDecisionResponse,
+  ClientSearchResults,
 } from './orchestration';
 
 function getBase(): string {
@@ -325,9 +332,7 @@ export async function listHandoffEvidence(
   return handleResponse<HandoffEvidenceListResponse>(res);
 }
 
-// ============================================================================
-// Health / Platform Status
-// ============================================================================
+// BRD-03 — Client Portal
 
 export async function getHealth(): Promise<HealthResponse> {
   const res = await fetch(`${getBase()}/health`);
@@ -342,6 +347,51 @@ export async function getReady(): Promise<ReadyResponse> {
 export async function getStatus(): Promise<PlatformStatus> {
   const res = await fetch(`${getBase()}/status`, { headers: getHeaders() });
   return handleResponse<PlatformStatus>(res);
+}
+
+// ============================================================================
+// BRD-03 — Client Portal
+// ============================================================================
+
+export async function getClientPortfolio(): Promise<ClientPortfolio> {
+  const res = await fetch(`${getBase()}/client-portal/portfolio`, { headers: getHeaders() });
+  return handleResponse<ClientPortfolio>(res);
+}
+
+export async function getClientProjectDetail(projectId: string): Promise<ClientProjectDetail> {
+  const res = await fetch(`${getBase()}/client-portal/projects/${projectId}`, { headers: getHeaders() });
+  return handleResponse<ClientProjectDetail>(res);
+}
+
+export async function getClientApprovalInbox(): Promise<ClientApprovalInbox> {
+  const res = await fetch(`${getBase()}/client-portal/approvals`, { headers: getHeaders() });
+  return handleResponse<ClientApprovalInbox>(res);
+}
+
+export async function decideClientApproval(
+  approvalId: string,
+  data: ApprovalDecisionRequest
+): Promise<ApprovalDecisionResponse> {
+  const res = await fetch(`${getBase()}/client-portal/approvals/${approvalId}/decide`, {
+    method: 'POST',
+    headers: getHeaders(),
+    body: JSON.stringify(data),
+  });
+  return handleResponse<ApprovalDecisionResponse>(res);
+}
+
+export async function searchClientPortal(
+  query: string,
+  params?: { health?: string; status?: string; type?: string[]; projectId?: string }
+): Promise<ClientSearchResults> {
+  const q = new URLSearchParams({ q: query });
+  if (params?.health) q.set('health', params.health);
+  if (params?.status) q.set('status', params.status);
+  if (params?.type?.length) q.set('type', params.type.join(','));
+  if (params?.projectId) q.set('projectId', params.projectId);
+  const qs = q.toString();
+  const res = await fetch(`${getBase()}/client-portal/search?${qs}`, { headers: getHeaders() });
+  return handleResponse<ClientSearchResults>(res);
 }
 
 // ============================================================================

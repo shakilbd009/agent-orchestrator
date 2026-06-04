@@ -363,3 +363,213 @@ export interface ApiError {
   code: string;
   message: string;
 }
+
+// ============================================================================
+// BRD-03 — Client Portal Types
+// ============================================================================
+
+export interface ProjectsHealthSummary {
+  onTrack: number;
+  atRisk: number;
+  blocked: number;
+}
+
+export interface ClientProjectSummary {
+  id: string;
+  name: string;
+  health: 'on_track' | 'at_risk' | 'blocked';
+  confidence: 'high' | 'medium' | 'low';
+  completionPercent: number; // -1 when no active tasks (nil backend)
+  nextMilestone: string | null;
+  pendingDecisions: number;
+  overdueDecisions: number;
+  latestUpdate: string; // ISO 8601
+}
+
+export interface PortfolioDecisionSummary {
+  totalPending: number;
+  overdue: number;
+  waitingOnClient: number;
+  atRiskCount: number;
+  blockedCount: number;
+}
+
+export interface ClientPortfolio {
+  projectsSummary: ProjectsHealthSummary;
+  projectList: ClientProjectSummary[];
+  decisionSummary: PortfolioDecisionSummary;
+  timestamp: string; // ISO 8601
+}
+
+export interface ClientTaskCard {
+  id: string;
+  projectId: string;
+  projectName: string;
+  title: string;
+  description: string | null;
+  status: TaskStatus;
+  priority: number;
+  layer: Layer;
+  assignee: string | null;
+  tags: string[];
+  dueDate: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ClientTaskColumn {
+  id: string;
+  title: string;
+  status: TaskStatus;
+  taskCards: ClientTaskCard[];
+  totalCount: number;
+  sortOrder: number;
+}
+
+export interface ClientApprovalItem {
+  id: string;
+  projectId: string;
+  projectName: string;
+  decisionTitle: string;
+  decisionType: 'milestone_approval' | 'gate_approval' | 'change_request' | 'budget_approval' | 'scope_approval';
+  requestedAt: string;
+  requestedBy: string;
+  dueDate: string | null;
+  priority: 'low' | 'medium' | 'high' | 'urgent';
+  status: 'pending' | 'approved' | 'rejected' | 'deferred';
+  summary: string;
+  affectedTasks: string[];
+  affectedMilestones: string[];
+  riskImpact: string | null;
+  requiresSignOff: string[];
+}
+
+export interface ClientRiskItem {
+  id: string;
+  projectId: string;
+  projectName: string;
+  title: string;
+  description: string;
+  severity: 'low' | 'medium' | 'high' | 'critical';
+  status: 'open' | 'mitigated' | 'accepted' | 'transferred';
+  raisedAt: string;
+  raisedBy: string;
+  mitigations: string[];
+  affectedTasks: string[];
+  dueDate: string | null;
+  lastReviewedAt: string | null;
+}
+
+export interface ClientMilestoneItem {
+  id: string;
+  projectId: string;
+  projectName: string;
+  title: string;
+  description: string | null;
+  dueDate: string;
+  status: 'upcoming' | 'at_risk' | 'completed' | 'missed';
+  completionPercent: number;
+  deliverables: string[];
+  dependencies: string[];
+  gateId: string | null;
+}
+
+export interface ClientComment {
+  id: string;
+  taskId: string;
+  authorId: string;
+  authorName: string;
+  authorRole: 'client' | 'agent' | 'system';
+  content: string;
+  createdAt: string;
+  updatedAt: string;
+  parentCommentId: string | null;
+  mentions: string[];
+  attachments: string[];
+}
+
+export interface ClientProjectDetail {
+  project: ClientProjectDetailProject;
+  healthSummary: ProjectsHealthSummary;
+  taskColumns: ClientTaskColumn[];
+  upcomingMilestones: ClientMilestoneItem[];
+  activeRisks: ClientRiskItem[];
+  approvalsPending: ClientApprovalItem[];
+  recentComments: ClientComment[];
+}
+
+/**
+ * Project shape returned by GET /client-portal/projects/{projectId}.
+ * Separate from ClientProjectSummary (portfolio list) — contains board,
+ * approvals, risks, milestones, and comments at the full detail level.
+ */
+export interface ClientProjectDetailProject {
+  id: string;
+  name: string; // from project name in repo
+  description: string | null; // nullable
+  phase: ProjectPhase;
+  health: 'on_track' | 'at_risk' | 'blocked';
+  confidence: 'high' | 'medium' | 'low';
+  taskCounts: { done: number; inProgress: number; todo: number; blocked: number };
+  progressPercent: number; // computed: (done/(total - cancelled)) * 100, -1 when nil
+  completionPercent: number; // -1 when nil (no active tasks)
+  timestamp: string; // ISO 8601
+  nextAction: string;
+}
+
+export interface ClientApprovalInbox {
+  items: ClientApprovalItem[];
+  totalCount: number;
+  urgentCount: number;
+  byPriority: {
+    urgent: number;
+    high: number;
+    medium: number;
+    low: number;
+  };
+  byType: Record<string, number>;
+  oldestPending: string | null; // ISO date
+}
+
+export type ApprovalOutcome = 'approve' | 'reject' | 'request_changes' | 'need_more_information';
+
+export interface ApprovalDecisionRequest {
+  approvalId: string;
+  outcome: ApprovalOutcome;
+  comments?: string;
+  signature?: string; // client identity verification
+}
+
+export interface ApprovalDecisionResponse {
+  success: boolean;
+  approvalId: string;
+  outcome: ApprovalOutcome;
+  decidedAt: string;
+  decidedBy: string;
+  notificationSent: boolean;
+}
+
+export interface ClientSearchResultItem {
+  id: string;
+  type: 'task' | 'project' | 'decision' | 'milestone' | 'risk' | 'comment';
+  title: string;
+  summary: string | null;
+  projectId: string | null;
+  projectName: string | null;
+  matchedOn: string[]; // field names that matched
+  highlightedText: string | null; // excerpt with match highlighted
+  relevanceScore: number;
+  url: string;
+}
+
+export interface ClientSearchResults {
+  query: string;
+  items: ClientSearchResultItem[];
+  totalCount: number;
+  searchDurationMs: number;
+  filters: {
+    type?: string[];
+    projectId?: string;
+    status?: TaskStatus[];
+  };
+}

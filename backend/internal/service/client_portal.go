@@ -120,6 +120,10 @@ func (s *ClientPortalService) GetProjectDetail(ctx context.Context, projectID, p
 		return nil, err
 	}
 
+	if s.logger != nil {
+		s.logger.ProjectViewed(ctx, principal, projectID)
+	}
+
 	return &models.ClientProjectDetail{
 		ID:               project.ID,
 		Health:           project.Health,
@@ -142,9 +146,33 @@ func (s *ClientPortalService) GetApprovalInbox(ctx context.Context, principal st
 	if err != nil {
 		return nil, err
 	}
+
+	var pending, overdue int
+	var oldestAgeMs int64
 	for i := range items {
 		items[i].Overdue = isOverdue(items[i].CreatedAt)
+		if items[i].Overdue {
+			overdue++
+		}
+		pending++
+		ageMs := time.Since(items[i].CreatedAt).Milliseconds()
+		if ageMs > oldestAgeMs {
+			oldestAgeMs = ageMs
+		}
 	}
+
+	// Record gauge values
+	if s.metrics != nil {
+		s.metrics.RecordPendingApprovalsGauge(ctx, pending)
+		s.metrics.RecordOverdueDecisionsGauge(ctx, overdue)
+		if oldestAgeMs > 0 {
+			s.metrics.RecordOldestPendingDecisionAge(ctx, oldestAgeMs)
+		}
+		// NOTE: decision_turnaround metric is recorded ONLY on decision completion
+		// (DecideApproval), not on the read path. Recording pending-age as turnaround
+		// would produce bogus samples (pending ≠ actionable-to-outcome duration).
+	}
+
 	return &models.ClientApprovalInbox{
 		Items:      items,
 		TotalCount: len(items),
@@ -188,7 +216,7 @@ func (s *ClientPortalService) DecideApproval(
 		}, nil
 	}
 
-	updated, err := s.approvalRepo.RecordDecision(ctx, approvalID, principal, req)
+	updated, projectID, err := s.approvalRepo.RecordDecision(ctx, approvalID, principal, req)
 	if err != nil {
 		return nil, err
 	}
@@ -202,11 +230,22 @@ func (s *ClientPortalService) DecideApproval(
 	updated.Overdue = isOverdue(updated.CreatedAt)
 
 	// Emit structured log events for decision outcomes
+	// Also record per-outcome gauges
+	if s.metrics != nil {
+		if req.Outcome == "need_more_information" {
+			s.metrics.RecordNeedMoreInformationGauge(ctx, s.metrics.NeedMoreInformationCurrent()+1)
+		}
+		if req.Outcome == "request_changes" {
+			s.metrics.RecordRequestedChangesGauge(ctx, s.metrics.RequestedChangesCurrent()+1)
+		}
+		s.metrics.RecordDecisionOutcome(ctx, req.Outcome)
+	}
 	if s.logger != nil {
 		if req.Outcome == "need_more_information" {
 			s.logger.ApprovalNeedMoreInformation(ctx, approvalID, principal, time.Now())
-		} else {
-			s.logger.ApprovalSubmitted(ctx, "", approvalID, req.Outcome, principal)
+		}
+		if req.Outcome != "need_more_information" {
+			s.logger.ApprovalSubmitted(ctx, projectID, approvalID, req.Outcome, principal, time.Now())
 		}
 	}
 
@@ -238,6 +277,52 @@ func (s *ClientPortalService) SearchClientPortal(
 	}, nil
 }
 
+// CreateComment inserts a new client-visible comment and emits instrumentation.
+func (s *ClientPortalService) CreateComment(ctx context.Context, c *models.ClientComment) error {
+	if err := s.commentRepo.CreateComment(ctx, c); err != nil {
+		return err
+	}
+	if s.metrics != nil {
+		s.metrics.RecordCommentCreated(ctx)
+	}
+	if s.logger != nil {
+		s.logger.CommentCreated(ctx, c.ProjectID, c.RelatedItemID, c.AuthorName, time.Now())
+	}
+	return nil
+}
+
+// EditComment updates an existing comment and emits instrumentation.
+func (s *ClientPortalService) EditComment(ctx context.Context, commentID, authorID, newBody string) (*models.ClientComment, error) {
+	c, err := s.commentRepo.EditComment(ctx, commentID, authorID, newBody)
+	if err != nil {
+		return nil, err
+	}
+	if c != nil && s.metrics != nil {
+		s.metrics.RecordCommentEdited(ctx)
+	}
+	if c != nil && s.logger != nil {
+		s.logger.CommentEdited(ctx, c.ProjectID, commentID, authorID, time.Now())
+	}
+	return c, nil
+}
+
+// DeleteComment removes a comment and emits instrumentation.
+func (s *ClientPortalService) DeleteComment(ctx context.Context, commentID, authorID string) (bool, error) {
+	deleted, err := s.commentRepo.DeleteComment(ctx, commentID, authorID)
+	if err != nil {
+		return false, err
+	}
+	if deleted {
+		if s.metrics != nil {
+			s.metrics.RecordCommentDeleted(ctx)
+		}
+		if s.logger != nil {
+			s.logger.CommentDeleted(ctx, "", commentID, authorID, time.Now())
+		}
+	}
+	return deleted, nil
+}
+
 // --- Repository Interfaces ---
 
 // ClientPortalProjectRepo abstracts project read operations for the client portal BFF.
@@ -254,12 +339,15 @@ type ClientPortalApprovalRepo interface {
 	ListProjectApprovals(ctx context.Context, projectID, principal string) ([]models.ClientApprovalItem, error)
 	ListAccessibleApprovals(ctx context.Context, principal string) ([]models.ClientApprovalItem, error)
 	ApprovalPrincipalHasAccess(ctx context.Context, approvalID, principal string) bool
-	RecordDecision(ctx context.Context, approvalID, principal string, req models.ApprovalDecisionRequest) (*models.ClientApprovalItem, error)
+	RecordDecision(ctx context.Context, approvalID, principal string, req models.ApprovalDecisionRequest) (*models.ClientApprovalItem, string, error)
 }
 
 // ClientPortalCommentRepo abstracts comment read operations for the client portal BFF.
 type ClientPortalCommentRepo interface {
 	ListByProjectAndItem(ctx context.Context, projectID, itemID string) ([]models.ClientComment, error)
+	CreateComment(ctx context.Context, c *models.ClientComment) error
+	EditComment(ctx context.Context, commentID, authorID, newBody string) (*models.ClientComment, error)
+	DeleteComment(ctx context.Context, commentID, authorID string) (bool, error)
 }
 
 // --- Internal DTOs ---

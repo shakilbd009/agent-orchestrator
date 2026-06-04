@@ -181,6 +181,15 @@ func main() {
 	cp.GET("/approvals", cpHandler.GetApprovalInbox)
 	cp.POST("/approvals/:approvalId/decide", cpHandler.DecideApproval)
 	cp.GET("/search", cpHandler.Search)
+	// NOTE: /stream (SSE) is NOT wired — OpenAPI contract does not include SSE endpoint.
+	// SSE Connected/Disconnected events and RecordSSEDisconnect remain unimplemented
+	// pending PM formal SSE extension (FR-03-055). Commented out until contract extended.
+	// cp.GET("/stream", cpHandler.StreamApprovalInbox)
+	// NOTE: /comments CRUD endpoints are out-of-scope for BRD-03 Phase 1.
+	// Routes remain commented until PM formally extends the OpenAPI contract.
+	// cp.POST("/comments", cpHandler.CreateComment)
+	// cp.PUT("/comments/:commentId", cpHandler.EditComment)
+	// cp.DELETE("/comments/:commentId", cpHandler.DeleteComment)
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -214,6 +223,11 @@ func loadFeatureFlags() {
 	if os.Getenv("FF_ENABLE_CLIENT_PORTAL") == "true" {
 		appmiddleware.FeatureFlags.ClientPortal = true
 	}
+	// NOTE: Comment CRUD is out-of-scope for BRD-03 Phase 1. Enable only when PM
+	// formally extends the contract. Until then the write surface is hidden.
+	// if os.Getenv("FF_ENABLE_CLIENT_PORTAL_COMMENTS") == "true" {
+	// 	appmiddleware.FeatureFlags.ClientPortalComments = true
+	// }
 }
 
 func runMigrations(ctx context.Context, db *repository.Pool) error {
@@ -247,6 +261,8 @@ func runMigrations(ctx context.Context, db *repository.Pool) error {
 		`CREATE INDEX IF NOT EXISTS idx_sse_project ON sse_clients(project_id)`,
 		`CREATE TABLE IF NOT EXISTS webhook_delivery_queue (id SERIAL PRIMARY KEY, webhook_id TEXT NOT NULL, event_id TEXT NOT NULL, payload JSONB NOT NULL, attempt_count INTEGER NOT NULL DEFAULT 0, next_retry_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())`,
 		`CREATE INDEX IF NOT EXISTS idx_wdq_next_retry ON webhook_delivery_queue(next_retry_at)`,
+		`CREATE TABLE IF NOT EXISTS comments (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, related_item_id TEXT NOT NULL, author_name TEXT NOT NULL DEFAULT '', body TEXT NOT NULL DEFAULT '', created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ)`,
+		`CREATE INDEX IF NOT EXISTS idx_comments_project_item ON comments(project_id, related_item_id)`,
 	}
 
 	for _, m := range migrations {

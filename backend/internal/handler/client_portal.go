@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/labstack/echo/v4"
@@ -53,9 +54,7 @@ func (h *ClientPortalHandler) GetPortfolio(c echo.Context) error {
 
 	h.metrics.RecordPortfolioView(ctx)
 	h.metrics.RecordPortfolioLoadDuration(ctx, durationMs)
-
-	// Emit structured log event
-	h.logger.PortfolioViewed(ctx, actor.ID, len(result.ProjectList))
+	// PortfolioViewed log emitted by service layer (to capture real principal+project count)
 
 	return c.JSON(http.StatusOK, result)
 }
@@ -90,9 +89,6 @@ func (h *ClientPortalHandler) GetProjectDetail(c echo.Context) error {
 
 	h.metrics.RecordProjectView(ctx, projectID)
 	h.metrics.RecordProjectLoadDuration(ctx, durationMs)
-
-	// Emit structured log event
-	h.logger.ProjectViewed(ctx, actor.ID, projectID)
 
 	return c.JSON(http.StatusOK, result)
 }
@@ -140,9 +136,6 @@ func (h *ClientPortalHandler) DecideApproval(c echo.Context) error {
 		})
 	}
 
-	// Fetch project ID for log event before service call
-	projectID := "" // service will provide it in the result if successful
-
 	result, err := h.svc.DecideApproval(ctx, approvalID, actor.ID, req)
 	if err != nil {
 		h.metrics.RecordSubmissionFailed(ctx)
@@ -159,15 +152,10 @@ func (h *ClientPortalHandler) DecideApproval(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, result)
 	}
 
-	// Record decision outcome metric
-	h.metrics.RecordDecisionOutcome(ctx, req.Outcome)
-	if req.Outcome == "need_more_information" {
-		h.metrics.RecordNeedMoreInformationGauge(ctx, 1)
-		h.logger.ApprovalNeedMoreInformation(ctx, approvalID, actor.ID, time.Now())
-	}
-
-	// Emit structured log event
-	h.logger.ApprovalSubmitted(ctx, projectID, approvalID, req.Outcome, actor.ID)
+	// Note: client_portal.approval.submitted log + decision_outcome metric are
+	// emitted by the service layer (the single authoritative source).
+	// Service records the outcome counter for ALL outcomes including NMI.
+	// Handler recordSubmissionFailed above covers failure path only.
 
 	return c.JSON(http.StatusOK, result)
 }
@@ -290,4 +278,135 @@ func ValidatePublication(c echo.Context) error {
 	})
 
 	return c.JSON(http.StatusOK, result)
+}
+
+// CreateComment handles POST /client-portal/comments
+// Creates a new client-visible comment.
+func (h *ClientPortalHandler) CreateComment(c echo.Context) error {
+	ctx := c.Request().Context()
+	actor := middleware.GetActor(c)
+
+	var req struct {
+		ProjectID    string `json:"projectId"`
+		RelatedItemID string `json:"relatedItemId"`
+		Body         string `json:"body"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, models.Error{
+			Type:   "https://api.agentorchestrator.example.com/errors/bad-request",
+			Title:  "Bad request",
+			Status: http.StatusBadRequest,
+			Detail: err.Error(),
+		})
+	}
+
+	if strings.TrimSpace(req.Body) == "" {
+		return c.JSON(http.StatusBadRequest, models.Error{
+			Type:   "https://api.agentorchestrator.example.com/errors/bad-request",
+			Title:  "Bad request",
+			Status: http.StatusBadRequest,
+			Detail: "body required",
+		})
+	}
+
+	comment := &models.ClientComment{
+		ID:            fmt.Sprintf("cmt_%d", time.Now().UnixNano()),
+		ProjectID:     req.ProjectID,
+		RelatedItemID: req.RelatedItemID,
+		AuthorName:    actor.ID,
+		Body:          req.Body,
+		CreatedAt:     time.Now().UTC(),
+	}
+
+	if err := h.svc.CreateComment(ctx, comment); err != nil {
+		h.metrics.RecordSubmissionFailed(ctx)
+		return c.JSON(http.StatusInternalServerError, models.Error{
+			Type:   "https://api.agentorchestrator.example.com/errors/internal",
+			Title:  "Internal server error",
+			Status: http.StatusInternalServerError,
+			Detail: err.Error(),
+		})
+	}
+	// CommentCreated metric + log emitted by service layer
+
+	return c.JSON(http.StatusCreated, comment)
+}
+
+// EditComment handles PUT /client-portal/comments/:commentId
+// Edits an existing comment body.
+func (h *ClientPortalHandler) EditComment(c echo.Context) error {
+	ctx := c.Request().Context()
+	actor := middleware.GetActor(c)
+	commentID := c.Param("commentId")
+
+	var req struct {
+		Body string `json:"body"`
+	}
+	if err := c.Bind(&req); err != nil {
+		return c.JSON(http.StatusBadRequest, models.Error{
+			Type:   "https://api.agentorchestrator.example.com/errors/bad-request",
+			Title:  "Bad request",
+			Status: http.StatusBadRequest,
+			Detail: err.Error(),
+		})
+	}
+
+	if strings.TrimSpace(req.Body) == "" {
+		return c.JSON(http.StatusBadRequest, models.Error{
+			Type:   "https://api.agentorchestrator.example.com/errors/bad-request",
+			Title:  "Bad request",
+			Status: http.StatusBadRequest,
+			Detail: "body required",
+		})
+	}
+
+	updated, err := h.svc.EditComment(ctx, commentID, actor.ID, req.Body)
+	if err != nil {
+		h.metrics.RecordSubmissionFailed(ctx)
+		return c.JSON(http.StatusInternalServerError, models.Error{
+			Type:   "https://api.agentorchestrator.example.com/errors/internal",
+			Title:  "Internal server error",
+			Status: http.StatusInternalServerError,
+			Detail: err.Error(),
+		})
+	}
+	if updated == nil {
+		return c.JSON(http.StatusNotFound, models.Error{
+			Type:   "https://api.agentorchestrator.example.com/errors/not-found",
+			Title:  "Not found",
+			Status: http.StatusNotFound,
+		})
+	}
+	// CommentEdited metric + log emitted by service layer
+
+	return c.JSON(http.StatusOK, updated)
+}
+
+// DeleteComment handles DELETE /client-portal/comments/:commentId
+// Deletes a comment.
+func (h *ClientPortalHandler) DeleteComment(c echo.Context) error {
+	ctx := c.Request().Context()
+	actor := middleware.GetActor(c)
+	commentID := c.Param("commentId")
+
+	deleted, err := h.svc.DeleteComment(ctx, commentID, actor.ID)
+	if err != nil {
+		h.metrics.RecordSubmissionFailed(ctx)
+		return c.JSON(http.StatusInternalServerError, models.Error{
+			Type:   "https://api.agentorchestrator.example.com/errors/internal",
+			Title:  "Internal server error",
+			Status: http.StatusInternalServerError,
+			Detail: err.Error(),
+		})
+	}
+	if !deleted {
+		return c.JSON(http.StatusNotFound, models.Error{
+			Type:   "https://api.agentorchestrator.example.com/errors/not-found",
+			Title:  "Not found",
+			Status: http.StatusNotFound,
+		})
+	}
+	// CommentDeleted metric + log emitted by service layer
+
+	return c.NoContent(http.StatusNoContent)
 }

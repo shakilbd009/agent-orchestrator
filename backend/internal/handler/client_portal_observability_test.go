@@ -335,9 +335,9 @@ func TestClientPortalLogger_AllEvents(t *testing.T) {
 	// All 16 log events from brd.md
 	logger.PortfolioViewed(ctx, "principal-1", 5)
 	logger.ProjectViewed(ctx, "principal-1", "proj-a")
-	logger.ApprovalSubmitted(ctx, "proj-a", "item-1", "approve", "principal-1")
+	logger.ApprovalSubmitted(ctx, "proj-a", "item-1", "approve", "principal-1", now)
 	logger.ApprovalNeedMoreInformation(ctx, "item-2", "principal-1", now)
-	logger.CommentCreated(ctx, "proj-a", "item-3", "principal-1")
+	logger.CommentCreated(ctx, "proj-a", "item-3", "principal-1", now)
 	logger.CommentEdited(ctx, "proj-a", "comment-1", "principal-1", now)
 	logger.CommentDeleted(ctx, "proj-a", "comment-2", "principal-1", now)
 	logger.ItemPublished(ctx, "proj-a", "item-4", "task", "actor-1", "passed")
