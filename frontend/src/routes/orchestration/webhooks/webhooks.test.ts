@@ -162,7 +162,7 @@ vi.mock('$lib/api/client', () => ({
 
 async function renderPage() {
   const Page = (await import('./+page.svelte')).default;
-  const result = render(Page);
+  const result = render(Page as any);
   // Flush reactive updates — wait for microtasks + tick for onMount + reactive state
   await Promise.resolve();
   await tick();
