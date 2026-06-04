@@ -43,11 +43,11 @@ jobs:
 
       - name: Run graduation package check
         env:
-          PHASE: 0
+          PHASE: 1
         run: |
-          echo "=== Phase 0 graduation package check ==="
+          echo "=== Phase 1 graduation package check ==="
           if [[ -f ./evals/architecture/check-graduation-package.sh ]]; then
-            PHASE=0 ./evals/architecture/check-graduation-package.sh
+            PHASE=1 ./evals/architecture/check-graduation-package.sh
           else
             echo "Graduation package script not yet created — skipping"
           fi
