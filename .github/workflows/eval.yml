@@ -73,7 +73,13 @@ jobs:
       - name: Validate docker-compose.yml
         run: |
           if [[ -f docker-compose.yml ]]; then
-            docker-compose config --quiet && echo "docker-compose.yml: valid"
+            if command -v docker-compose >/dev/null 2>&1; then
+              docker-compose config --quiet && echo "docker-compose.yml: valid"
+            elif command -v docker >/dev/null 2>&1; then
+              docker compose -f docker-compose.yml config --quiet && echo "docker-compose.yml: valid (docker compose)"
+            else
+              echo "docker/docker-compose not available — skipping validation"
+            fi
           else
             echo "docker-compose.yml not present — skipping"
           fi
