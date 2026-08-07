@@ -147,6 +147,16 @@ Kanban task completion does not substitute for a PR. A closed kanban task is an 
 
 ---
 
+## Architecture baseline
+
+`ARCHITECTURE.md` (repo root) is the **approved reference architecture**: system diagram + components table + approval boundaries. It is the baseline every PR is reviewed against — see it there rather than this section for component detail.
+
+- **Architecture-impacting PRs update the baseline in the same PR.** Any PR that adds, changes, or removes a component, dependency, trust boundary, or external integration MUST include an `ARCHITECTURE.md` update, guided by the `architecture-impact` skill's `review` mode (which proposes the patch). The baseline becomes approved architecture only when merged to `main`.
+- **Approval boundaries require explicit captain sign-off before merge**: new services, datastores, external systems/vendors, cross-domain writes, auth-boundary changes, breaking public contracts, and destructive migrations (these mirror the "Approval boundaries" section of `ARCHITECTURE.md`).
+- The `architecture-impact` skill enforces this — `init` to establish the baseline, `review` on each PR. Its safety rules are **static reads + git only**; never install dependencies or run builds to produce or check the baseline.
+
+---
+
 ## Orchestrator Pipeline Gate Chain
 
 Every BRD moves through this gate sequence before implementation begins. Gates are Kanban task dependency edges (parent → child). A child task does not promote to `ready` until all parent tasks reach `done`. A validator task returning `done` is not approval — its output is findings; a PM gate-review task must explicitly approve before downstream work begins.
