@@ -18,6 +18,8 @@
 backend/tmp/
 frontend/tmp/
 frontend/.svelte-kit/
+# code-impact tool binary (manual `go build` in the package dir; dispatcher builds to mktemp)
+scripts/code-impact-go/code-impact-go
 
 # Dependency caches
 backend/vendor/

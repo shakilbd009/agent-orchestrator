@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -215,42 +216,57 @@ func (a *goAnalyzer) analyzeFile(file string) {
 	baseFuncs := a.funcs(a.base, file)
 	headFuncs := a.funcs(a.head, file)
 
-	inBase := map[string]bool{}
-	for k := range baseFuncs {
-		inBase[k] = true
-	}
-
 	// changed hunks in HEAD coordinates — the modification signal (spec §2.1).
 	hunks, _ := diffHunks(a.base, a.head, file)
+	changes := classifyFuncs(baseFuncs, headFuncs, hunks)
 
 	// ponytail: iterate in SOURCE order (by start line), not map order — Go map
 	// iteration is randomized, which would make the diagram non-reproducible
 	// across runs. Reproducible output is required for CI (Phase 3).
 	for _, canon := range sortedByLine(headFuncs) {
-		hf := headFuncs[canon]
-		var change string
-		switch {
-		case !inBase[canon]:
-			change = classAdd
-		case intersects(hf.start, hf.end, hunks):
-			change = classMod
-		default:
+		change, ok := changes[canon]
+		if !ok {
 			continue // unchanged context — not a primary node
 		}
-		a.emitChangedFunc(file, hf, change)
+		a.emitChangedFunc(file, headFuncs[canon], change)
 	}
 	// removals: in base, gone from head (source-ordered for determinism)
 	for _, canon := range sortedByLine(baseFuncs) {
-		bf := baseFuncs[canon]
-		if _, ok := headFuncs[canon]; ok {
+		change, ok := changes[canon]
+		if !ok {
 			continue
 		}
+		bf := baseFuncs[canon]
 		// ponytail: removal classification uses presence only; a rename shows as
 		// rem+add pair (known limitation, no type info to link them).
 		a.emitChangedFunc(file, &funcInfo{
 			canon: bf.canon, plain: bf.plain, recv: bf.recv, start: bf.start, end: bf.end,
-		}, classRem)
+		}, change)
 	}
+}
+
+// classifyFuncs returns canon -> change (add|mod|rem) given the base/head func
+// maps and HEAD-side diff hunks. Pure (no git/AST side effects) so it is
+// unit-testable on fake func maps (M3).
+//   - in head, not base                                   -> add
+//   - in both, span intersects a hunk                      -> mod
+//   - in base, not head                                   -> rem
+func classifyFuncs(baseFuncs, headFuncs map[string]*funcInfo, hunks []hunk) map[string]string {
+	out := map[string]string{}
+	for canon, hf := range headFuncs {
+		switch {
+		case baseFuncs[canon] == nil:
+			out[canon] = classAdd
+		case intersects(hf.start, hf.end, hunks):
+			out[canon] = classMod
+		}
+	}
+	for canon := range baseFuncs {
+		if headFuncs[canon] == nil {
+			out[canon] = classRem
+		}
+	}
+	return out
 }
 
 func (a *goAnalyzer) emitChangedFunc(file string, f *funcInfo, change string) {
@@ -292,7 +308,7 @@ func (a *goAnalyzer) calleeNodeKey(plain string) string {
 		}
 	}
 	// external / unresolved -> shared gray context node; edge will be dashed (unexpected).
-	ext := &node{key: "ext::go::" + plain, label: plain + "  (callee)", lang: "go", change: classCtx}
+	ext := &node{key: "ext::go::" + plain, label: plain + " (callee)", lang: "go", change: classCtx}
 	a.g.addNode(ext)
 	return ext.key
 }
@@ -308,7 +324,7 @@ func (a *goAnalyzer) callersOf(f *funcInfo, ownFile string) []funcInfo {
 	} else {
 		pat = `\b` + f.plain + `\(`
 	}
-	hits, _ := gitGrep(pat, "*.go")
+	hits, _ := gitGrep(pat, a.head, "*.go")
 	var out []funcInfo
 	for _, h := range hits {
 		if h.file == ownFile && f.start != 0 && within(h.line, f.start, f.end) {
@@ -702,12 +718,15 @@ func (g *graph) testImpactTable() string {
 func mermaidLabel(n *node) string {
 	var s string
 	if len(n.exports) > 0 {
-		s = fmt.Sprintf("%s\\n[%s]", n.file, strings.Join(n.exports, ", "))
+		// M1: <br/> not \n — Mermaid v11 renders \n as literal text inside quoted
+		// labels; <br/> is the reliable line break. %q in the renderer leaves it
+		// unescaped (no special chars), so it reaches GitHub Markdown intact.
+		s = fmt.Sprintf("%s<br/>[%s]", n.file, strings.Join(n.exports, ", "))
 	} else {
 		s = n.label
 	}
 	if n.file != "" && n.lang == "go" {
-		s = fmt.Sprintf("%s\\n%s", n.label, shortFile(n.file))
+		s = fmt.Sprintf("%s<br/>%s", n.label, shortFile(n.file))
 	}
 	return s
 }
@@ -785,8 +804,14 @@ func diffHunks(base, head, file string) ([]hunk, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parseHunks(out), nil
+}
+
+// parseHunks extracts the HEAD-side (+) line ranges from a unified diff. Pure
+// (no git) so it is unit-testable on synthetic @@ -a,b +c,d @@ strings.
+func parseHunks(diff string) []hunk {
 	var hs []hunk
-	for _, line := range strings.Split(out, "\n") {
+	for _, line := range strings.Split(diff, "\n") {
 		if !strings.HasPrefix(line, "@@") {
 			continue
 		}
@@ -802,28 +827,17 @@ func diffHunks(base, head, file string) ([]hunk, error) {
 		}
 		plus := rest[:j]
 		parts := strings.SplitN(plus, ",", 2)
-		start := atoi(parts[0])
+		start, _ := strconv.Atoi(parts[0])
 		count := 1
 		if len(parts) == 2 {
-			count = atoi(parts[1])
+			count, _ = strconv.Atoi(parts[1])
 		}
 		if count == 0 {
 			continue // pure deletion hunk has no + lines
 		}
 		hs = append(hs, hunk{start: start, end: start + count - 1})
 	}
-	return hs, nil
-}
-
-func atoi(s string) int {
-	n := 0
-	for _, c := range s {
-		if c < '0' || c > '9' {
-			break
-		}
-		n = n*10 + int(c-'0')
-	}
-	return n
+	return hs
 }
 
 func changedFiles(base, head string) ([]string, error) {
@@ -850,24 +864,31 @@ type grepHit struct {
 	line int
 }
 
-func gitGrep(pattern, pathspec string) ([]grepHit, error) {
-	out, err := gitOutput("grep", "-n", "-E", "--no-color", pattern, "--", pathspec)
+func gitGrep(pattern, head, pathspec string) ([]grepHit, error) {
+	// M2: ref-qualify to HEAD_REF — `git grep <rev> -- <pathspec>` searches that
+	// rev's tree, not the working tree. In Phase 3 CI the working tree is `main`
+	// with pr-head as a ref only, so a working-tree grep would use wrong callers.
+	out, err := gitOutput("grep", "-n", "-E", "--no-color", pattern, head, "--", pathspec)
 	if err != nil {
 		return nil, nil // no matches -> git grep exits 1; treat as empty.
 	}
+	// rev-mode output is `<head>:file:line:content` — strip the `<head>:` prefix
+	// so file/line parse the same as working-tree mode.
+	prefix := head + ":"
 	var hits []grepHit
 	for _, line := range strings.Split(out, "\n") {
 		if line == "" {
 			continue
 		}
-		// form: file:line:content
+		line = strings.TrimPrefix(line, prefix)
+		// form: file:line:content (paths in this tree have no ':' so first colon is the sep)
 		c1 := strings.IndexByte(line, ':')
 		c2 := strings.IndexByte(line[c1+1:], ':')
 		if c1 < 0 || c2 < 0 {
 			continue
 		}
 		file := line[:c1]
-		ln := atoi(line[c1+1 : c1+1+c2])
+		ln, _ := strconv.Atoi(line[c1+1 : c1+1+c2])
 		hits = append(hits, grepHit{file: file, line: ln})
 	}
 	return hits, nil

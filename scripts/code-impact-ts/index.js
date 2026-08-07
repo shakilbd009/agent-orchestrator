@@ -43,7 +43,7 @@ function main() {
       isTest,
     };
     nodes.push(node);
-    for (const dep of importersOf(file)) {
+    for (const dep of importersOf(file, head)) {
       const isTest = /\.test\.[tj]sx?$|\.spec\.[tj]sx?$|\.test\.svelte$/.test(dep);
       edges.push({
         from: "ts::" + dep,
@@ -112,7 +112,7 @@ function exportDelta(baseSet, headSet) {
 // ponytail: matches the changed file's $lib alias path or basename. Relative
 // import resolution (../../foo) is approximate — false-negative risk on unusual
 // relative paths; acceptable for blast-radius viz, no type info needed.
-function importersOf(file) {
+function importersOf(file, head) {
   const lib = file.replace(/^frontend\/src\//, "").replace(/\.[tj]sx?$/, "").replace(/\.svelte$/, "");
   const base = lib.split("/").pop();
   let out;
@@ -121,24 +121,28 @@ function importersOf(file) {
     // imports are indented and (b) git grep -E is POSIX ERE with no `\s`. Use an
     // unanchored pattern to find candidate files; the per-file module check below
     // does the precise matching.
+    // M2: ref-qualify to HEAD_REF — `git grep <rev>` searches that rev's tree, not
+    // the working tree (Phase 3 CI checks out `main`, pr-head is a ref only).
     out = execFileSync(
       "git",
-      ["grep", "-l", "-E", "import .* from", "--", "frontend"],
+      ["grep", "-l", "-E", "import .* from", head, "--", "frontend"],
       { encoding: "utf8" }
     );
   } catch (e) {
     return [];
   }
   const deps = new Set();
-  for (const line of out.split("\n")) {
-    if (!line) continue;
+  const prefix = head + ":"; // rev-mode output is `<head>:path`
+  for (const raw of out.split("\n")) {
+    if (!raw) continue;
+    const line = raw.startsWith(prefix) ? raw.slice(prefix.length) : raw;
     if (line === file) continue; // self
     if (line.startsWith("scripts/")) continue;
     if (!/\.[tj]sx?$|\.svelte$/.test(line)) continue;
     // read the import lines of the candidate and see if they mention this module
     let src;
     try {
-      src = gitShow("HEAD", line) || readDisk(line);
+      src = gitShow(head, line) || readDisk(line);
     } catch {
       continue;
     }
