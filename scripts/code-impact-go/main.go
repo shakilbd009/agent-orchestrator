@@ -223,7 +223,11 @@ func (a *goAnalyzer) analyzeFile(file string) {
 	// changed hunks in HEAD coordinates — the modification signal (spec §2.1).
 	hunks, _ := diffHunks(a.base, a.head, file)
 
-	for canon, hf := range headFuncs {
+	// ponytail: iterate in SOURCE order (by start line), not map order — Go map
+	// iteration is randomized, which would make the diagram non-reproducible
+	// across runs. Reproducible output is required for CI (Phase 3).
+	for _, canon := range sortedByLine(headFuncs) {
+		hf := headFuncs[canon]
 		var change string
 		switch {
 		case !inBase[canon]:
@@ -235,8 +239,9 @@ func (a *goAnalyzer) analyzeFile(file string) {
 		}
 		a.emitChangedFunc(file, hf, change)
 	}
-	// removals: in base, gone from head
-	for canon, bf := range baseFuncs {
+	// removals: in base, gone from head (source-ordered for determinism)
+	for _, canon := range sortedByLine(baseFuncs) {
+		bf := baseFuncs[canon]
 		if _, ok := headFuncs[canon]; ok {
 			continue
 		}
@@ -746,6 +751,22 @@ func methodTail(canon string) string {
 }
 
 func within(line, start, end int) bool { return line >= start && line <= end }
+
+// sortedByLine returns func keys sorted by source start line then canon, for
+// deterministic, reproducible output (map iteration is randomized in Go).
+func sortedByLine(m map[string]*funcInfo) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if m[keys[i]].start != m[keys[j]].start {
+			return m[keys[i]].start < m[keys[j]].start
+		}
+		return keys[i] < keys[j]
+	})
+	return keys
+}
 
 func intersects(start, end int, hunks []hunk) bool {
 	for _, h := range hunks {
