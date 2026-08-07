@@ -118,6 +118,9 @@ hermes kanban show <task_id>       # Read task
 hermes kanban create "<title>"      # Create task
 hermes kanban complete <task_id>    # Close task (with summary)
 
+# Per-PR impact diagram (function/module granularity; complements ARCHITECTURE.md)
+scripts/code-impact --base <ref> --head <ref>   # see scripts/CODE_IMPACT.md
+
 # Docker (use standalone on this Mac)
 docker-compose up -d
 docker-compose down
