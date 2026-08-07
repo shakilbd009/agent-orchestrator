@@ -413,50 +413,96 @@ export function createSSEConnection(opts: SSEOptions): { close: () => void } {
   const base = getBase();
   const params = new URLSearchParams();
   if (opts.events?.length) params.set('events', opts.events.join(','));
-  const url = `${base}/projects/${opts.projectId}/stream${params.toString() ? `?${params}` : ''}`;
+  // Backend route: GET /projects/:projectId/events/stream (main.go).
+  const url = `${base}/projects/${opts.projectId}/events/stream${params.toString() ? `?${params}` : ''}`;
 
-  let es: EventSource;
   let lastEventId: string | null = null;
   let reconnectAttempts = 0;
   let closed = false;
   let reconnectTimer: ReturnType<typeof setTimeout>;
+  let controller: AbortController | null = null;
+
+  // Backend emits NAMED SSE events ("event: <topic>\nid: <eventId>\ndata: <json>\n\n",
+  // handler/handlers.go). Per the SSE spec, named events never dispatch to the
+  // default 'message' handler, so we parse the raw stream ourselves. fetch also
+  // lets us send the Authorization / Last-Event-ID headers EventSource cannot.
+  function dispatchFrame(event: string, data: string) {
+    if (!data) return;
+    try {
+      const envelope = JSON.parse(data) as EventEnvelope;
+      lastEventId = envelope.eventId;
+      reconnectAttempts = 0;
+      opts.onEvent(envelope);
+    } catch {
+      // ignore parse errors on non-JSON data lines
+    }
+  }
+
+  // Parse SSE text frames across chunk boundaries. A blank line ends a field
+  // block and dispatches it. Fields: event, id, data (may repeat, joined by \n).
+  function parseStream(stream: ReadableStream<Uint8Array>) {
+    const reader = stream.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let eventName = '';
+    let dataLines: string[] = [];
+
+    function feed(chunk: string) {
+      buffer += chunk.replace(/\r\n/g, '\n');
+      let sep: number;
+      // Split on blank line (frame boundary). The tail with no trailing blank
+      // line stays in the buffer for the next chunk.
+      while ((sep = buffer.indexOf('\n\n')) !== -1) {
+        const frame = buffer.slice(0, sep);
+        buffer = buffer.slice(sep + 2);
+        for (const rawLine of frame.split('\n')) {
+          if (rawLine.startsWith(':')) continue; // comment / keepalive
+          const colon = rawLine.indexOf(':');
+          const field = colon === -1 ? rawLine : rawLine.slice(0, colon);
+          // Per spec, strip a single leading space from the value.
+          let value = colon === -1 ? '' : rawLine.slice(colon + 1);
+          if (value.startsWith(' ')) value = value.slice(1);
+          if (field === 'event') eventName = value;
+          else if (field === 'data') dataLines.push(value);
+          else if (field === 'id' && value) lastEventId = value;
+        }
+        dispatchFrame(eventName, dataLines.join('\n'));
+        eventName = '';
+        dataLines = [];
+      }
+    }
+
+    function pump(): Promise<void> {
+      return reader.read().then(({ done, value }) => {
+        if (done) return;
+        feed(decoder.decode(value, { stream: true }));
+        return pump();
+      });
+    }
+
+    return pump();
+  }
 
   function connect() {
-    const headers: Record<string, string> = {
-      Accept: 'text/event-stream',
-    };
+    controller = new AbortController();
+    const headers: Record<string, string> = { Accept: 'text/event-stream' };
     const token = typeof localStorage !== 'undefined' ? localStorage.getItem('app_token') : null;
     if (token) headers['Authorization'] = `Bearer ${token}`;
     if (lastEventId) headers['Last-Event-ID'] = lastEventId;
 
-    // Use fetch + ReadableStream for SSE (EventSource doesn't support custom headers)
-    // Fall back to EventSource for simplicity when no auth required
-    es = new EventSource(url);
-    opts.onConnect?.();
-
-    es.addEventListener('message', (e: MessageEvent) => {
-      try {
-        const envelope = JSON.parse(e.data) as EventEnvelope;
-        lastEventId = envelope.eventId;
-        reconnectAttempts = 0;
-        opts.onEvent(envelope);
-      } catch {
-        // ignore parse errors
-      }
-    });
-
-    es.addEventListener('error', () => {
-      es.close();
-      if (closed) return;
-      reconnectAttempts++;
-      const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
-      reconnectTimer = setTimeout(connect, delay);
-      opts.onError?.(new Error(`SSE disconnected, reconnecting in ${delay}ms (attempt ${reconnectAttempts})`));
-    });
-
-    es.addEventListener('open', () => {
-      reconnectAttempts = 0;
-    });
+    fetch(url, { headers, signal: controller.signal })
+      .then((res) => {
+        if (!res.ok || !res.body) throw new Error(`SSE HTTP ${res.status}`);
+        opts.onConnect?.();
+        return parseStream(res.body);
+      })
+      .catch((err: unknown) => {
+        if (closed || controller?.signal.aborted) return;
+        reconnectAttempts++;
+        const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), 30000);
+        reconnectTimer = setTimeout(connect, delay);
+        opts.onError?.(new Error(`SSE disconnected, reconnecting in ${delay}ms (attempt ${reconnectAttempts})`));
+      });
   }
 
   connect();
@@ -465,7 +511,7 @@ export function createSSEConnection(opts: SSEOptions): { close: () => void } {
     close() {
       closed = true;
       clearTimeout(reconnectTimer);
-      es?.close();
+      controller?.abort();
       opts.onDisconnect?.();
     },
   };

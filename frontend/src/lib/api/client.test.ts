@@ -296,18 +296,61 @@ describe('listProjectPhaseGates', () => {
 // ---------------------------------------------------------------------------
 // SSE — FR-02-023
 // ---------------------------------------------------------------------------
+// Builds a fetch Response whose body is a live ReadableStream of SSE bytes.
+function makeSSEResponse(frames: string[]): Response {
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const f of frames) controller.enqueue(new TextEncoder().encode(f));
+      controller.close();
+    },
+  });
+  return new Response(stream, {
+    status: 200,
+    headers: { 'Content-Type': 'text/event-stream' },
+  });
+}
+
 describe('createSSEConnection — FR-02-023', () => {
-  it('returns an object with a close function', async () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it('parses NAMED SSE events and dispatches the envelope (FR-02-023)', async () => {
+    // Backend emits named events (event: <topic>), which never reach the
+    // default 'message' handler — verify the client parses them directly.
+    const envelope = {
+      eventId: 'evt-1',
+      schemaVersion: 'v1alpha',
+      projectId: 'proj-alpha',
+      topic: 'task.created',
+      actorId: 'actor-1',
+      actorRole: 'layer_a',
+      taskId: 'task-1',
+      parentTaskId: null,
+      gateId: null,
+      timestamp: '2026-05-28T12:00:00.000Z',
+      payload: { kind: 'task' },
+    };
+    const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValueOnce(
+      makeSSEResponse([
+        `event: task.created\nid: ${envelope.eventId}\ndata: ${JSON.stringify(envelope)}\n\n`,
+      ])
+    );
+
     const { createSSEConnection } = await import('./client');
+    const onEvent = vi.fn();
     const conn = createSSEConnection({
       projectId: 'proj-alpha',
-      onEvent: vi.fn(),
+      onEvent,
       onError: vi.fn(),
       onConnect: vi.fn(),
       onDisconnect: vi.fn(),
     });
+
     expect(conn).toBeDefined();
     expect(typeof conn.close).toBe('function');
+    // Named event (task.created) must hit onEvent even though there is no 'message' listener.
+    await vi.waitFor(() => expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ topic: 'task.created', eventId: 'evt-1' })));
+    // Correct endpoint path (was previously the 404 '/stream').
+    expect(fetchSpy.mock.calls[0]?.[0]).toContain('/projects/proj-alpha/events/stream');
     conn.close();
   });
 });

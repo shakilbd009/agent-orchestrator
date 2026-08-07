@@ -6,7 +6,7 @@
  * event chip suggestions (all 18 types), HMAC signature badge.
  *
  * Architecture: ALL vi.mock calls are at TOP LEVEL of this file (hoisted by Vitest).
- * vitest-setup.ts only provides jsdom globals (localStorage, EventSource).
+ * vitest-setup.ts only provides jsdom globals (localStorage).
  * SvelteKit virtual modules ($app/navigation, $app/state, $lib/api/client) are mocked here
  * so the mock is registered before any module graph is resolved.
  */

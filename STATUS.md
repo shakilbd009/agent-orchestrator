@@ -1,8 +1,8 @@
 # STATUS.md — Agent Orchestrator Platform
 
 **Project:** agent-orchestrator  
-**Last Updated:** 2026-05-30 — BRD-03 approved for curation  
-**Governance Phase:** 0 — Foundation & Governance  
+**Last Updated:** 2026-08-06 — Phase 2 (BRD-02/03) implemented; SSE live-update client repaired  
+**Governance Phase:** 2 — Core Delivery (Phase 0 + Phase 1 complete; BRD-02/03 shipped)  
 
 ---
 
@@ -10,9 +10,9 @@
 
 | Phase | Name | Status | Notes |
 |-------|------|--------|-------|
-| 0 | Foundation & Governance | In Progress | Artifacts being created |
-| 1 | App Shell (BRD-01) | Pending | Blocked on Phase 0 |
-| 2 | Core Delivery (BRD-02+) | Pending | Blocked on Phase 1 |
+| 0 | Foundation & Governance | Done | Artifacts merged; ADR-0001 in place |
+| 1 | App Shell (BRD-01) | Done | Go/Echo backend + SvelteKit frontend scaffold runnable |
+| 2 | Core Delivery (BRD-02/03) | Implemented | BRD-02 orchestration pipeline + BRD-03 client portal shipped. SSE live-update client repaired (was 404 + wrong event name). Agent-execution harness (BRD-04+), LLM provider (BRD-05), agent memory (BRD-06) still unbuilt |
 
 ---
 
@@ -20,7 +20,7 @@
 
 | Decision | Rationale | Trade-off | Mitigation |
 |---|---|---|---|
-| **D-0001: Phase 0 produces no source code** | Governance artifacts must be finalized before implementation to prevent retrofitting constraints. | Slows initial delivery; no running software until Phase 1. | Artifacts are lightweight; Phase 1 scaffold is fast. |
+| **D-0001: Phase 0 produced no source code (completed)** | Governance artifacts were finalized before implementation. Phase 0 is now done; `backend/` and `frontend/` contain real Phase 1/2 code (~11.7k LOC Go, ~9k LOC frontend). | Slowed initial delivery until Phase 1. | Superseded in practice by Phase 1/2 delivery; no longer a binding constraint. |
 | **D-0002: Use `docker-compose` (standalone v5.0.2) not `docker compose` (v2 plugin)** | `docker compose` (v2) is not installed on this Mac. `docker-compose` (standalone v1) is available at `/usr/local/bin/docker-compose`. | Scripts and documentation must consistently use the standalone command name. | All compose commands pinned to `docker-compose`; documented in AGENTS.md. |
 | **D-0003: pnpm as workspace package manager** | Phase 0 session confirmed pnpm 10.32.1 available. `sv` CLI supports `--install pnpm`. Consistent with project-scaffold convention. | Team members accustomed to npm/yarn must adopt pnpm. | Lockfile pinned; `AGENTS.md` records exact version. |
 | **D-0004: Go 1.25.6 + Echo v4.15.2 for backend** | Go 1.25.6 is the newest available and confirmed working with Echo v4. Echo v4 is the current stable major version. | Go 1.25.6 is very new; some ecosystem packages may lag. | Pin in `AGENTS.md`; update via ADR when stability confirmed. |
@@ -40,9 +40,12 @@
 
 | Task | Assignee | Status |
 |---|---|---|
-| Phase 0 batch 1: scaffold + env | `ops` | Done |
-| Phase 0 batch 2: governance artifacts | `architect` | In Progress |
-| Phase 0 batch 3: kanban board setup | `pm` | Pending |
+| Phase 0 scaffolding + governance | `ops` / `architect` | Done |
+| Phase 1 app shell (BRD-01) | `developer` | Done |
+| Phase 2 BRD-02 orchestration pipeline | `developer` | Done |
+| Phase 2 BRD-03 client portal | `developer` | Done |
+| SSE live-update client repair (404 path + named-event dispatch) | crewmate | Done (this branch) |
+| Agent-execution harness + BRD-04/05/06 | TBD | Not started |
 
 ---
 
@@ -50,8 +53,12 @@
 
 | BRD | Title | Status | Artifact |
 |---|---|---|---|
-| BRD-02 | Platform-Native Orchestration Pipeline | In Curation | `specs/orchestration/brd-02-platform-native-orchestration-pipeline.md` |
-| BRD-03 | Client Portal and Business Project Board | In Curation | `specs/ui/brd-03-client-portal.md` |
+| BRD-02 | Platform-Native Orchestration Pipeline | Implemented | `specs/curated/BRD-02-orchestration-pipeline.md` |
+| BRD-03 | Client Portal and Business Project Board | Implemented | `specs/ui/brd-03-client-portal.md` |
+| BRD-04 | Agent Workstream Dashboard | Not started (placeholder) | — |
+| BRD-05 | LLM Provider Integration | Not started (placeholder) | `specs/curated/BRD-05-llm-provider.md` |
+| BRD-06 | Agent Memory and State | Not started (placeholder) | `specs/curated/BRD-06-agent-memory.md` |
+| — | Agent-execution harness | Not started | — |
 
 ---
 
@@ -59,12 +66,13 @@
 
 | Blocker | Owner | Status |
 |---|---|---|
-| Phase 0 governance artifacts not finalized | `architect` | In Progress |
-| Kanban board not yet created for this project | `pm` | Pending |
+| _(none active)_ | — | — |
+
+Open items below are planned work, not blockers: agent-execution harness, BRD-04/05/06.
 
 ---
 
-## Risks (Phase 0)
+## Risks
 
 | Risk | Severity | Mitigation |
 |---|---|---|
@@ -77,6 +85,7 @@
 
 ## Handoff Notes
 
-- Phase 0 batch 1 created `backend/.gitkeep` and `frontend/.gitkeep` — both confirmed empty.
-- `references/agent-orchestrator-phase0-session.md` contains verified tool versions from the ops session.
-- All Phase 0 artifacts should be committed to `main` before Phase 1 begins.
+- Phase 0 is complete; `backend/` and `frontend/` now hold real Phase 1/2 implementation (~11.7k LOC Go incl. tests, ~9k LOC frontend, 32 commits on `main`).
+- BRD-02 (orchestration pipeline) and BRD-03 (client portal) are implemented behind feature flags (`platform-orchestration`, `client-portal`).
+- The SSE live-update client (`frontend/src/lib/api/client.ts`) was repaired: the `/projects/:id/stream` 404 and the `message`-listener-vs-named-event mismatch are fixed; named events now render in the `/orchestration` ticker.
+- Agent-execution harness and BRD-04/05/06 remain unbuilt — do not claim them in docs.
