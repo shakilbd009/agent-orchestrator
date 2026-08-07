@@ -198,6 +198,7 @@ type FeatureFlags struct {
 	HumanGates            bool `json:"human-gates"`
 	AuditTrail            bool `json:"audit-trail"`
 	ClientPortal          bool `json:"client-portal"`
+	AgentHarness          bool `json:"agent-harness"` // BRD-04+: spawns a real worker per activated task (DEV: pi/opencode)
 }
 
 // OrchestrationTaskCreateRequest is the request body for creating a task.

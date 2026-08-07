@@ -313,6 +313,26 @@ func (h *Handlers) GetTaskDependencies(c echo.Context) error {
 	})
 }
 
+// ActivateProjectTask moves a task to in_progress and, when the agent-harness
+// flag is on, spawns a real worker (pi/opencode) for it. Wired to
+// POST /projects/:projectId/tasks/:taskId/activate (BRD-04+ harness entry point).
+func (h *Handlers) ActivateProjectTask(c echo.Context) error {
+	projectID := c.Param("projectId")
+	taskID := c.Param("taskId")
+
+	actor := middleware.GetActor(c)
+	task, err := h.taskSvc.ActivateTask(c.Request().Context(), projectID, taskID, actor)
+	if err != nil {
+		return c.JSON(http.StatusForbidden, models.Error{
+			Type:   "https://api.agentorchestrator.example.com/errors/forbidden",
+			Title:  "Forbidden",
+			Status: http.StatusForbidden,
+			Detail: err.Error(),
+		})
+	}
+	return c.JSON(http.StatusOK, task)
+}
+
 // Gate handlers
 
 func (h *Handlers) CreateTaskGate(c echo.Context) error {

@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/labstack/echo/v4"
@@ -77,6 +78,18 @@ func main() {
 	// Initialize services
 	projectSvc := service.NewProjectService(projectRepo, eventSvc)
 	taskSvc := service.NewTaskService(taskRepo, projectRepo, eventSvc)
+
+	// Agent-execution harness (BRD-04+). DEV backend: pi primary, opencode fallback.
+	// Best-effort: if neither runtime is on PATH the harness stays nil and
+	// ActivateTask degrades to plain in_progress (manual coordination).
+	if h, err := service.NewDevHarness(); err == nil {
+		log.Printf("agent-harness: DEV backend = %s", h.Runtime())
+		taskSvc.SetHarness(h)
+		service.ConfigureHarness(envInt("AGENT_HARNESS_MAX_CONCURRENT", 6), envDuration("AGENT_HARNESS_TASK_TIMEOUT", 30*time.Minute))
+	} else {
+		log.Printf("agent-harness: disabled (%v)", err)
+	}
+
 	gateSvc := service.NewGateService(gateRepo, eventSvc)
 	decompSvc := service.NewDecompositionService(decompRepo, taskRepo, eventSvc)
 	webhookSvc := service.NewWebhookService(webhookRepo, eventSvc)
@@ -146,6 +159,7 @@ func main() {
 	projects.GET("/:projectId/tasks/:taskId", h.GetProjectTask)
 	projects.POST("/:projectId/tasks/:taskId/block", h.BlockProjectTask)
 	projects.POST("/:projectId/tasks/:taskId/complete", h.CompleteProjectTask)
+	projects.POST("/:projectId/tasks/:taskId/activate", h.ActivateProjectTask)
 
 	// Task dependencies
 	projects.GET("/:projectId/tasks/:taskId/dependencies", h.GetTaskDependencies)
@@ -223,6 +237,9 @@ func loadFeatureFlags() {
 	if os.Getenv("FF_ENABLE_CLIENT_PORTAL") == "true" {
 		appmiddleware.FeatureFlags.ClientPortal = true
 	}
+	if os.Getenv("FF_ENABLE_AGENT_HARNESS") == "true" {
+		appmiddleware.FeatureFlags.AgentHarness = true
+	}
 	// NOTE: Comment CRUD is out-of-scope for BRD-03 Phase 1. Enable only when PM
 	// formally extends the contract. Until then the write surface is hidden.
 	// if os.Getenv("FF_ENABLE_CLIENT_PORTAL_COMMENTS") == "true" {
@@ -286,4 +303,30 @@ func runWebhookWorker(ctx context.Context, queue *event.WebhookQueue, repo *repo
 			queue.ProcessQueue(ctx)
 		}
 	}
+}
+
+// envInt reads a positive int env var, returning fallback otherwise.
+func envInt(key string, fallback int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return fallback
+	}
+	return n
+}
+
+// envDuration reads a duration env var (e.g. "45m", "2h"), returning fallback otherwise.
+func envDuration(key string, fallback time.Duration) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return fallback
+	}
+	return d
 }
