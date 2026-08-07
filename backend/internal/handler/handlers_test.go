@@ -357,7 +357,7 @@ func TestStreamProjectEvents_SSEReplayWithLastEventID(t *testing.T) {
 					EventID:       "ev_C",
 					SchemaVersion: "v1alpha",
 					ProjectID:     "proj_1",
-					Topic:         "task.status_changed",
+					Topic:         "task.status.changed",
 					ActorID:       "user_1",
 					ActorRole:     "human",
 					Timestamp:     "2026-01-01T00:00:02Z",
@@ -405,8 +405,8 @@ func TestStreamProjectEvents_SSEReplayWithLastEventID(t *testing.T) {
 	if !strings.Contains(body, "id: ev_C") {
 		t.Errorf("expected SSE data to contain 'id: ev_C', got: %s", body)
 	}
-	if !strings.Contains(body, "event: task.status_changed") {
-		t.Errorf("expected SSE data to contain 'event: task.status_changed', got: %s", body)
+	if !strings.Contains(body, "event: task.status.changed") {
+		t.Errorf("expected SSE data to contain 'event: task.status.changed', got: %s", body)
 	}
 }
 

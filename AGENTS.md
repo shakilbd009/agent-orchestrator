@@ -23,19 +23,17 @@ Layer A agents own the process contract. Layer B agents own the output quality. 
 ## Phase Boundaries
 
 ```
-Phase 0 — Governance & Scaffolding
+Phase 0 — Governance & Scaffolding                            [DONE]
   └─ Artifacts: AGENTS.md, STATUS.md, docs/adr/0001.md, .gitignore, .env.example
-  └─ No source code. No backend/frontend implementation.
 
-Phase 1 — App Shell (BRD-01)
-  └─ Empty backend/ and frontend/ directories exist
-  └─ Minimal working scaffold: Go/Echo server, SvelteKit UI
-  └─ Shell is runnable, not feature-complete
+Phase 1 — App Shell (BRD-01)                                  [DONE]
+  └─ Go/Echo server (backend/) + SvelteKit UI (frontend/) scaffold
+  └─ Shell is runnable; see backend/main.go and frontend/
 
-Phase 2 — Core Delivery (BRD-02 through BRD-N)
-  └─ Full agent orchestration pipeline
-  └─ Quality gates, audit trail, dashboard
-  └─ Production-ready output
+Phase 2 — Core Delivery (BRD-02 through BRD-N)                [IN PROGRESS]
+  └─ BRD-02 Platform-Native Orchestration Pipeline — implemented
+  └─ BRD-03 Client Portal & Business Project Board — implemented
+  └─ BRD-04+ (agent-execution harness, LLM provider, agent memory) — not yet built
 ```
 
 Phase 0 artifacts remain valid throughout Phase 1 and Phase 2 unless explicitly superseded by a new ADR.
@@ -44,7 +42,7 @@ Phase 0 artifacts remain valid throughout Phase 1 and Phase 2 unless explicitly 
 
 ## Pinned Tool Versions
 
-These versions are locked for the lifetime of Phase 0. Phase 1 may update pins via a new ADR.
+These versions were locked for Phase 0. Phase 1/2 updates require a new ADR.
 
 | Tool | Version | Notes |
 |------|---------|-------|
@@ -128,8 +126,6 @@ npx sv create <path> --template minimal --types ts --install pnpm
 # Go/Echo
 go mod init <module>
 go get github.com/labstack/echo/v4@v4.15.2
-
-# Phase 0 rule: no source code in backend/ or frontend/
 ```
 
 ---
@@ -237,3 +233,12 @@ If a sub-project or subdirectory needs its own agent guidance (e.g., `backend/CL
 | `docs/adr/*.md` (future) | `architect` | On each decision |
 
 ADR decisions are immutable once merged. Superseding an ADR requires opening a new ADR that explicitly superseded the old one.
+
+---
+
+## Maintaining this file
+
+Keep this file for knowledge useful to almost every future agent session in this project.
+Do not repeat what the codebase already shows; point to the authoritative file or command instead.
+Prefer rewriting or pruning existing entries over appending new ones.
+When updating this file, preserve this bar for all agents and keep entries concise.

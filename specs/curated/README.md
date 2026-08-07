@@ -1,7 +1,7 @@
 # Curated BRDs
 
 **Project:** agent-orchestrator  
-**Phase:** 0  
+**Phase:** 2 — Core Delivery (Phase 0 + Phase 1 complete; BRD-02/03 shipped)  
 
 ---
 
@@ -13,9 +13,9 @@ This directory contains the canonical BRD artifacts for the Agent Orchestrator P
 
 | BRD | Domain | Phase | Status | Title |
 |-----|--------|-------|--------|-------|
-| BRD-01 | App Shell | Phase 1 | placeholder | Application Shell and Minimal Scaffold |
-| BRD-02 | Orchestration | Phase 1 | placeholder | Core Orchestration Pipeline |
-| BRD-03 | UI | Phase 1 | placeholder | Business Dashboard |
+| BRD-01 | App Shell | Phase 1 | implemented | Application Shell and Minimal Scaffold |
+| BRD-02 | Orchestration | Phase 2 | implemented | Platform-Native Orchestration Pipeline |
+| BRD-03 | UI | Phase 2 | implemented | Client Portal and Business Project Board |
 | BRD-04 | UI | Phase 1 | placeholder | Agent Workstream Dashboard |
 | BRD-05 | Backend | Phase 1 | placeholder | LLM Provider Integration |
 | BRD-06 | Backend | Phase 1 | placeholder | Agent Memory and State |
@@ -53,8 +53,10 @@ This directory contains the canonical BRD artifacts for the Agent Orchestrator P
 
 ---
 
-## Phase 0 Position
+## Phase Status
 
-During Phase 0, no BRDs in this directory contain authored content. All entries are placeholders. The full BRD-01 (App Shell) will be authored in Phase 1 as the first delivery artifact.
+Phase 0 (governance) and Phase 1 (app shell, BRD-01) are complete. Phase 2 is in progress: BRD-02 (Platform-Native Orchestration Pipeline) and BRD-03 (Client Portal) are implemented behind feature flags. BRD-04+ remain placeholders — not yet built (agent-execution harness, LLM provider, agent memory still unbuilt).
+
+Authored BRDs: `BRD-01-app-shell.md`, `BRD-02-orchestration-pipeline.md`, `BRD-03-client-portal.md`. The remaining entries below are placeholders.
 
 The template for all BRDs is at `specs/_template.md`. The feature flag registry is at `specs/feature-flags.md`.
