@@ -9,6 +9,11 @@
 .idea/
 *.iml
 
+# Harness artifacts
+# Pi/fm-ensure-agents-md creates CLAUDE.md -> AGENTS.md in the worktree; this
+# project declares "no separate CLAUDE.md" in AGENTS.md, so never commit it.
+/CLAUDE.md
+
 # Build artifacts
 backend/tmp/
 frontend/tmp/
