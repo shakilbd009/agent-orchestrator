@@ -111,7 +111,7 @@ func loadFixtureRecords(t *testing.T) []map[string]any {
 // asserts the parser accumulates the assistant's final text and sees agent_end.
 func TestParsePiRecord_RealFixture(t *testing.T) {
 	records := loadFixtureRecords(t)
-	st := &piState{runtime: "pi"}
+	st := &runState{runtime: "pi"}
 	task := HarnessTask{ID: "t1"}
 	prof := roleProfiles["developer"]
 
@@ -122,8 +122,8 @@ func TestParsePiRecord_RealFixture(t *testing.T) {
 			steps++
 		}
 	}
-	if !st.sawAgentEnd {
-		t.Error("expected sawAgentEnd after replaying fixture")
+	if !st.sawTerminal {
+		t.Error("expected sawTerminal after replaying fixture")
 	}
 	if st.finalText != "PONG" {
 		t.Errorf("finalText = %q, want PONG", st.finalText)
@@ -135,7 +135,7 @@ func TestParsePiRecord_RealFixture(t *testing.T) {
 
 // TestParsePiRecord_TurnEndCarriesText confirms turn_end alone seeds finalText.
 func TestParsePiRecord_TurnEndCarriesText(t *testing.T) {
-	st := &piState{runtime: "pi"}
+	st := &runState{runtime: "pi"}
 	parsePiRecord(map[string]any{
 		"type":    "turn_end",
 		"message": map[string]any{"role": "assistant", "content": []any{map[string]any{"type": "text", "text": "hello"}}},
@@ -151,7 +151,7 @@ func TestParsePiRecord_TurnEndCarriesText(t *testing.T) {
 
 func TestDecideTerminal_NonZeroExitBlocked(t *testing.T) {
 	h := &devHarness{runtime: "pi"}
-	ev := h.decideTerminal(context.Background(), &exec.ExitError{}, &piState{finalText: "partial"}, HarnessTask{ID: "t1"}, roleProfiles["developer"])
+	ev := h.decideTerminal(context.Background(), &exec.ExitError{}, &runState{finalText: "partial"}, HarnessTask{ID: "t1"}, roleProfiles["developer"])
 	if ev.Kind != WorkerBlocked {
 		t.Fatalf("want blocked, got %v", ev.Kind)
 	}
@@ -161,7 +161,7 @@ func TestDecideTerminal_CanceledBlocked(t *testing.T) {
 	h := &devHarness{runtime: "pi"}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	ev := h.decideTerminal(ctx, nil, &piState{finalText: "x"}, HarnessTask{ID: "t1"}, roleProfiles["developer"])
+	ev := h.decideTerminal(ctx, nil, &runState{finalText: "x"}, HarnessTask{ID: "t1"}, roleProfiles["developer"])
 	if ev.Kind != WorkerBlocked {
 		t.Fatalf("canceled ctx should be blocked, got %v", ev.Kind)
 	}
@@ -169,7 +169,7 @@ func TestDecideTerminal_CanceledBlocked(t *testing.T) {
 
 func TestDecideTerminal_CleanExitWithTextCompleted(t *testing.T) {
 	h := &devHarness{runtime: "pi"}
-	ev := h.decideTerminal(context.Background(), nil, &piState{finalText: "did the thing"}, HarnessTask{ID: "t1"}, roleProfiles["developer"])
+	ev := h.decideTerminal(context.Background(), nil, &runState{finalText: "did the thing"}, HarnessTask{ID: "t1"}, roleProfiles["developer"])
 	if ev.Kind != WorkerCompleted {
 		t.Fatalf("want completed, got %v", ev.Kind)
 	}
@@ -180,7 +180,7 @@ func TestDecideTerminal_CleanExitWithTextCompleted(t *testing.T) {
 
 func TestDecideTerminal_CleanExitNoTextIdle(t *testing.T) {
 	h := &devHarness{runtime: "pi"}
-	ev := h.decideTerminal(context.Background(), nil, &piState{finalText: ""}, HarnessTask{ID: "t1"}, roleProfiles["developer"])
+	ev := h.decideTerminal(context.Background(), nil, &runState{finalText: ""}, HarnessTask{ID: "t1"}, roleProfiles["developer"])
 	if ev.Kind != WorkerIdle {
 		t.Fatalf("want idle, got %v", ev.Kind)
 	}
@@ -188,7 +188,7 @@ func TestDecideTerminal_CleanExitNoTextIdle(t *testing.T) {
 
 func TestDecideTerminal_StartFailureBlocked(t *testing.T) {
 	h := &devHarness{runtime: "pi"}
-	ev := h.decideTerminal(context.Background(), errors.New("signal: killed"), &piState{}, HarnessTask{ID: "t1"}, roleProfiles["developer"])
+	ev := h.decideTerminal(context.Background(), errors.New("signal: killed"), &runState{}, HarnessTask{ID: "t1"}, roleProfiles["developer"])
 	if ev.Kind != WorkerBlocked {
 		t.Fatalf("run error should be blocked, got %v", ev.Kind)
 	}
@@ -612,4 +612,230 @@ func setFlag(t *testing.T, set func()) {
 		middleware.FeatureFlags.PlatformOrchestration = prevPlat
 		middleware.FeatureFlags.AgentHarness = prevHarness
 	})
+}
+
+// ---------------------------------------------------------------------------
+// M2 — OpenCode --format json parser (real captured shape)
+// ---------------------------------------------------------------------------
+
+func opencodeFixtureLines() []string {
+	return []string{
+		`{"type":"step_start","timestamp":1786110986735,"part":{"type":"step-start"}}`,
+		`{"type":"text","timestamp":1786110986781,"part":{"type":"text","text":"PONG","time":{"start":1786110986731,"end":1786110986770}}}`,
+		`{"type":"step_finish","timestamp":1786110986781,"part":{"reason":"stop","type":"step-finish","tokens":{"total":25609}}}`,
+	}
+}
+
+func TestParseOpenCodeRecord_StopReason(t *testing.T) {
+	st := &runState{runtime: "opencode"}
+	task := HarnessTask{ID: "t1"}
+	prof := roleProfiles["developer"]
+	for _, line := range opencodeFixtureLines() {
+		var rec map[string]any
+		if err := json.Unmarshal([]byte(line), &rec); err != nil {
+			t.Fatalf("unmarshal: %v", err)
+		}
+		parseOpenCodeRecord(rec, st, task, prof)
+	}
+	if !st.ocStopped {
+		t.Error("expected ocStopped after step_finish reason=stop")
+	}
+	if !st.sawTerminal {
+		t.Error("expected sawTerminal")
+	}
+	if st.finalText != "PONG" {
+		t.Errorf("finalText=%q want PONG", st.finalText)
+	}
+}
+
+func TestParseOpenCodeRecord_NonStopReasonIsNotClean(t *testing.T) {
+	st := &runState{runtime: "opencode"}
+	var rec map[string]any
+	_ = json.Unmarshal([]byte(`{"type":"step_finish","part":{"reason":"length","type":"step-finish"}}`), &rec)
+	parseOpenCodeRecord(rec, st, HarnessTask{ID: "t1"}, roleProfiles["developer"])
+	if st.ocStopped {
+		t.Error("non-stop reason must NOT set ocStopped")
+	}
+	if st.ocStopReason != "length" {
+		t.Errorf("ocStopReason=%q want length", st.ocStopReason)
+	}
+}
+
+func TestDecideTerminal_OpenCodeStopCompleted(t *testing.T) {
+	h := &devHarness{runtime: "opencode"}
+	ev := h.decideTerminal(context.Background(), nil, &runState{runtime: "opencode", ocStopped: true, finalText: "done"}, HarnessTask{ID: "t1"}, roleProfiles["developer"])
+	if ev.Kind != WorkerCompleted {
+		t.Fatalf("want completed, got %v", ev.Kind)
+	}
+}
+
+func TestDecideTerminal_OpenCodeNoStopBlocked(t *testing.T) {
+	h := &devHarness{runtime: "opencode"}
+	// Non-empty text but no clean stop signal must NOT be classified completed.
+	ev := h.decideTerminal(context.Background(), nil, &runState{runtime: "opencode", finalText: "some output"}, HarnessTask{ID: "t1"}, roleProfiles["developer"])
+	if ev.Kind != WorkerBlocked {
+		t.Fatalf("want blocked (no stop signal), got %v", ev.Kind)
+	}
+}
+
+func TestSpawn_OpenCodeFixtureYieldsCompleted(t *testing.T) {
+	body := strings.Join(opencodeFixtureLines(), "\n") + "\n"
+	h := &devHarness{
+		runtime: "opencode",
+		buildCmd: func(ctx context.Context, name string, args []string, dir string) cmdRunner {
+			return &fakeCmd{stdout: ioReader{data: body}}
+		},
+	}
+	// Verify argv actually carries --format json (M2).
+	_, args := h.commandFor(AgentProfile{}, "x", "sess", "/tmp")
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--format json") {
+		t.Errorf("opencode args must include --format json; got %s", joined)
+	}
+	if strings.Contains(joined, " -s ") { // m6: -s omitted on first run
+		t.Errorf("opencode args must not pass -s on first run; got %s", joined)
+	}
+
+	events, err := h.Spawn(context.Background(), HarnessTask{ID: "t1", ProjectID: "p1"}, roleProfiles["developer"])
+	if err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	var terminal *WorkerEvent
+	for ev := range events {
+		terminal = &ev
+	}
+	if terminal == nil || terminal.Kind != WorkerCompleted {
+		t.Fatalf("expected completed terminal, got %+v", terminal)
+	}
+	if terminal.Summary != "PONG" {
+		t.Errorf("summary=%q want PONG", terminal.Summary)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// B1 — per-task deadline is wired into the worker context
+// ---------------------------------------------------------------------------
+
+type deadlineCapturingHarness struct{ got context.Context }
+
+func (d *deadlineCapturingHarness) Runtime() string { return "fake" }
+func (d *deadlineCapturingHarness) Spawn(ctx context.Context, _ HarnessTask, _ AgentProfile) (<-chan WorkerEvent, error) {
+	d.got = ctx
+	ch := make(chan WorkerEvent)
+	close(ch)
+	return ch, nil
+}
+
+func TestActivateTask_WorkerCtxHasDeadline(t *testing.T) {
+	ConfigureHarness(defaultMaxConcurrentWorkers, 5*time.Minute)
+	t.Cleanup(func() { ConfigureHarness(defaultMaxConcurrentWorkers, defaultWorkerTimeout) })
+
+	setFlag(t, func() { middleware.FeatureFlags.AgentHarness = true })
+	svc, taskRepo, _ := newTaskSvcWithCapture()
+	fake := &deadlineCapturingHarness{}
+	svc.SetHarness(fake)
+	taskRepo.getTaskByIDFn = func(_ context.Context, pid, tid string) (*models.OrchestrationTask, error) {
+		return &models.OrchestrationTask{ID: tid, ProjectID: pid, Assignee: "developer", Layer: "B", Status: "todo"}, nil
+	}
+	taskRepo.updateTaskStatusFn = func(context.Context, string, string, string, *models.Actor, string) error { return nil }
+	taskRepo.blockTaskFn = func(context.Context, string, string, string, *models.Actor) error { return nil }
+
+	if _, err := svc.ActivateTask(context.Background(), "p1", "t1", &models.Actor{ID: "h", Role: "human"}); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if fake.got == nil {
+		t.Fatal("Spawn was not called")
+	}
+	if _, ok := fake.got.Deadline(); !ok {
+		t.Error("worker context must carry a deadline (B1 per-task timeout)")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// M1 — concurrency cap: a full slot emits agent.blocked, no spawn
+// ---------------------------------------------------------------------------
+
+func TestActivateTask_ConcurrencyLimitBlocks(t *testing.T) {
+	ConfigureHarness(1, defaultWorkerTimeout) // cap 1
+	t.Cleanup(func() { ConfigureHarness(defaultMaxConcurrentWorkers, defaultWorkerTimeout) })
+
+	setFlag(t, func() { middleware.FeatureFlags.AgentHarness = true })
+
+	// Exhaust the single slot so ActivateTask cannot acquire one.
+	if !acquireWorkerSlot() {
+		t.Fatal("precondition: could not acquire the slot")
+	}
+	t.Cleanup(releaseWorkerSlot)
+
+	svc, taskRepo, evt := newTaskSvcWithCapture()
+	spawned := 0
+	svc.SetHarness(&countingHarness{onSpawn: func() { spawned++ }})
+	taskRepo.getTaskByIDFn = func(_ context.Context, pid, tid string) (*models.OrchestrationTask, error) {
+		return &models.OrchestrationTask{ID: tid, ProjectID: pid, Assignee: "developer", Layer: "B", Status: "todo"}, nil
+	}
+	taskRepo.updateTaskStatusFn = func(context.Context, string, string, string, *models.Actor, string) error { return nil }
+	var blockedTask string
+	taskRepo.blockTaskFn = func(_ context.Context, _, tid, _ string, _ *models.Actor) error {
+		blockedTask = tid
+		return nil
+	}
+
+	if _, err := svc.ActivateTask(context.Background(), "p1", "t_limit", &models.Actor{ID: "h", Role: "human"}); err != nil {
+		t.Fatalf("unexpected: %v", err)
+	}
+	if spawned != 0 {
+		t.Errorf("expected no spawn when concurrency cap reached, got %d", spawned)
+	}
+	if !evt.hasTopic("agent.blocked") {
+		t.Errorf("expected agent.blocked; saw %v", evt.topics())
+	}
+	if blockedTask != "t_limit" {
+		t.Errorf("expected BlockTask called, got %q", blockedTask)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// M3 — empty assignee is rejected early (no silent block)
+// ---------------------------------------------------------------------------
+
+func TestActivateTask_EmptyAssigneeRejected(t *testing.T) {
+	setFlag(t, func() { middleware.FeatureFlags.AgentHarness = true })
+	svc, taskRepo, _ := newTaskSvcWithCapture()
+	svc.SetHarness(&countingHarness{onSpawn: func() { t.Error("must not spawn for unassigned task") }})
+	taskRepo.getTaskByIDFn = func(_ context.Context, pid, tid string) (*models.OrchestrationTask, error) {
+		return &models.OrchestrationTask{ID: tid, ProjectID: pid, Assignee: "", Layer: "B", Status: "todo"}, nil
+	}
+	taskRepo.updateTaskStatusFn = func(context.Context, string, string, string, *models.Actor, string) error { return nil }
+
+	_, err := svc.ActivateTask(context.Background(), "p1", "t1", &models.Actor{ID: "h", Role: "human"})
+	if err == nil {
+		t.Fatal("expected error activating an unassigned task")
+	}
+	if !strings.Contains(err.Error(), "assignee") {
+		t.Errorf("error should mention assignee; got %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// m4 — channel closed without a terminal event is caught, not orphaned
+// ---------------------------------------------------------------------------
+
+func TestSuperviseWorker_ChannelClosedWithoutTerminalBlocks(t *testing.T) {
+	svc, taskRepo, evt := newTaskSvcWithCapture()
+	var blocked bool
+	taskRepo.blockTaskFn = func(context.Context, string, string, string, *models.Actor) error {
+		blocked = true
+		return nil
+	}
+	ch := make(chan WorkerEvent)
+	close(ch) // no terminal event
+
+	svc.superviseWorker(context.Background(), "p1", "t1", "dev1", "B", ch)
+
+	if !blocked {
+		t.Error("expected BlockTask for an orphaned stream")
+	}
+	if !evt.hasTopic("agent.blocked") {
+		t.Errorf("expected agent.blocked; saw %v", evt.topics())
+	}
 }

@@ -389,11 +389,7 @@ func (s *TaskService) ActivateTask(ctx context.Context, projectID, taskID string
 	}
 
 	// Spawn a worker only when the harness flag is on and a backend is wired.
-	if !harnessEnabled() || s.harness == nil {
-		return task, nil
-	}
-	if !markWorkerActive(taskID) {
-		// A worker is already running for this task; do not double-spawn.
+	if !middleware.FeatureFlags.AgentHarness || s.harness == nil {
 		return task, nil
 	}
 
@@ -403,12 +399,36 @@ func (s *TaskService) ActivateTask(ctx context.Context, projectID, taskID string
 		layer = profile.Layer
 	}
 	agentName := task.Assignee
+
+	// M3: a Layer-B completion requires actor.ID == task.Assignee (CompleteTask
+	// enforces this). An unassigned task would do real work then be silently
+	// misreported blocked, so activation requires an assignee. Reject early with
+	// a clear reason rather than spawning into a guaranteed failure.
 	if agentName == "" {
-		agentName = profile.Name
+		return nil, fmt.Errorf("cannot activate task with no assignee; assign an agent before activating")
+	}
+
+	if !markWorkerActive(taskID) {
+		// A worker is already running for this task; do not double-spawn.
+		return task, nil
+	}
+
+	// M1: bound concurrent workers. If the cap is reached, surface as blocked
+	// instead of spawning another process.
+	if !acquireWorkerSlot() {
+		releaseWorker(taskID)
+		reason := "worker concurrency limit reached"
+		s.emitAgentEvent(ctx, "agent.blocked", &taskID, projectID, agentName, layer, map[string]any{
+			"agentName": agentName, "layer": layer, "taskId": taskID, "reason": reason,
+		})
+		_ = s.repo.BlockTask(ctx, projectID, taskID, reason, actor)
+		return task, nil
 	}
 
 	// agent.activated fires the moment we commit to spawning the worker.
-	s.emitAgentActivated(ctx, projectID, taskID, agentName, layer)
+	s.emitAgentEvent(ctx, "agent.activated", &taskID, projectID, agentName, layer, map[string]any{
+		"agentName": agentName, "layer": layer, "taskId": taskID,
+	})
 
 	htask := HarnessTask{
 		ID:            task.ID,
@@ -419,13 +439,19 @@ func (s *TaskService) ActivateTask(ctx context.Context, projectID, taskID string
 		Layer:         layer,
 		WorkspacePath: task.WorkspacePath,
 	}
-	wctx, cancel := context.WithCancel(context.Background())
+	// B1: per-task deadline so a hung worker (network stall, infinite tool loop)
+	// is reaped instead of wedging the task and leaking the process. The
+	// cancellation surfaces as agent.blocked via decideTerminal.
+	wctx, cancel := context.WithTimeout(context.Background(), harnessTaskTimeout)
 	events, err := s.harness.Spawn(wctx, htask, profile)
 	if err != nil {
 		cancel()
 		releaseWorker(taskID)
+		releaseWorkerSlot()
 		reason := "worker spawn failed: " + err.Error()
-		s.emitAgentBlocked(ctx, projectID, taskID, agentName, layer, reason)
+		s.emitAgentEvent(ctx, "agent.blocked", &taskID, projectID, agentName, layer, map[string]any{
+			"agentName": agentName, "layer": layer, "taskId": taskID, "reason": reason,
+		})
 		_ = s.repo.BlockTask(ctx, projectID, taskID, reason, actor)
 		return task, nil
 	}

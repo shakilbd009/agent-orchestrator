@@ -6,7 +6,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/agent-orchestrator/backend/internal/middleware"
 	"github.com/agent-orchestrator/backend/internal/models"
 )
 
@@ -172,6 +171,50 @@ func roleForLayer(layer string) string {
 // envelope — it reuses the canonical AuditEvent path that already feeds SSE.
 // ---------------------------------------------------------------------------
 
+// Harness limits. Defaults are conservative; override via ConfigureHarness from
+// env (AGENT_HARNESS_MAX_CONCURRENT / AGENT_HARNESS_TASK_TIMEOUT) in main.go.
+// Call ConfigureHarness before the first activation (tests use the defaults).
+const (
+	defaultMaxConcurrentWorkers = 6
+	defaultWorkerTimeout        = 30 * time.Minute
+)
+
+var (
+	harnessTaskTimeout = defaultWorkerTimeout
+	// workerSlots bounds concurrent worker processes (B1/M1: liveness + resource
+	// ceiling). A buffered channel used as a counting semaphore.
+	workerSlots = make(chan struct{}, defaultMaxConcurrentWorkers)
+)
+
+// ConfigureHarness sets the worker concurrency cap and per-task timeout. Must be
+// called before the first ActivateTask (it replaces the semaphore channel).
+func ConfigureHarness(maxConcurrent int, taskTimeout time.Duration) {
+	if maxConcurrent > 0 {
+		workerSlots = make(chan struct{}, maxConcurrent)
+	}
+	if taskTimeout > 0 {
+		harnessTaskTimeout = taskTimeout
+	}
+}
+
+// acquireWorkerSlot tries to take a concurrency slot. Returns false if the cap
+// is reached (caller emits agent.blocked instead of spawning).
+func acquireWorkerSlot() bool {
+	select {
+	case workerSlots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func releaseWorkerSlot() {
+	select {
+	case <-workerSlots:
+	default:
+	}
+}
+
 // activeWorkers prevents double-spawning a worker for the same task.
 // ponytail: in-memory only; not durable across process restarts. If the backend
 // restarts mid-run the task stays in_progress until re-activated or a human
@@ -191,20 +234,23 @@ func releaseWorker(taskID string) {
 
 // superviseWorker consumes a worker's event stream and drives the task lifecycle.
 // It runs in its own goroutine, launched by TaskService.ActivateTask. The context
-// must outlive the originating HTTP request (use context.Background-derived).
+// carries the per-task deadline (B1) so a hung worker is reaped, not wedged.
 func (s *TaskService) superviseWorker(
 	ctx context.Context,
 	projectID, taskID, agentName, layer string,
 	events <-chan WorkerEvent,
 ) {
 	defer releaseWorker(taskID)
+	defer releaseWorkerSlot()
 
+	terminal := false
 	for ev := range events {
 		switch ev.Kind {
 		case WorkerStep:
 			// Informational only; no agent.* topic in the v1alpha contract.
 			continue
 		case WorkerCompleted:
+			terminal = true
 			actor := &models.Actor{ID: agentName, Role: roleForLayer(layer)}
 			handoff := &models.HandoffEvidence{
 				Summary:               ev.Summary,
@@ -218,10 +264,13 @@ func (s *TaskService) superviseWorker(
 				// Surface as blocked so the orchestrator can re-route.
 				reason := fmt.Sprintf("completion rejected: %v", err)
 				_ = s.BlockTask(ctx, projectID, taskID, reason, actor)
-				s.emitAgentBlocked(ctx, projectID, taskID, agentName, layer, reason)
+				s.emitAgentEvent(ctx, "agent.blocked", &taskID, projectID, agentName, layer, map[string]any{
+					"agentName": agentName, "layer": layer, "taskId": taskID, "reason": reason,
+				})
 			}
 			return
 		case WorkerBlocked:
+			terminal = true
 			actor := &models.Actor{ID: agentName, Role: roleForLayer(layer)}
 			reason := ev.Message
 			if reason == "" && ev.Err != nil {
@@ -231,81 +280,47 @@ func (s *TaskService) superviseWorker(
 				reason = "worker could not proceed"
 			}
 			_ = s.BlockTask(ctx, projectID, taskID, reason, actor)
-			s.emitAgentBlocked(ctx, projectID, taskID, agentName, layer, reason)
+			s.emitAgentEvent(ctx, "agent.blocked", &taskID, projectID, agentName, layer, map[string]any{
+				"agentName": agentName, "layer": layer, "taskId": taskID, "reason": reason,
+			})
 			return
 		case WorkerIdle:
-			s.emitAgentIdle(ctx, projectID, agentName, layer)
+			terminal = true
+			now := time.Now().UTC().Format(time.RFC3339Nano)
+			s.emitAgentEvent(ctx, "agent.idle", nil, projectID, agentName, layer, map[string]any{
+				"agentName": agentName, "layer": layer, "idleSince": now,
+			})
 			return
 		}
 	}
+
+	// m4 safety net: the channel closed without a terminal event (e.g. a future
+	// stream early-return). Don't leave the task pinned in_progress silently.
+	if !terminal {
+		reason := "worker stream ended without a terminal event"
+		actor := &models.Actor{ID: agentName, Role: roleForLayer(layer)}
+		_ = s.BlockTask(ctx, projectID, taskID, reason, actor)
+		s.emitAgentEvent(ctx, "agent.blocked", &taskID, projectID, agentName, layer, map[string]any{
+			"agentName": agentName, "layer": layer, "taskId": taskID, "reason": reason,
+		})
+	}
 }
 
-// emitAgentActivated emits agent.activated (payload per contracts/events.md).
-func (s *TaskService) emitAgentActivated(ctx context.Context, projectID, taskID, agentName, layer string) {
-	taskIDPtr := &taskID
+// emitAgentEvent emits one agent.* event on the canonical envelope. topic is one
+// of agent.activated / agent.idle / agent.blocked; taskID is nil for agent.idle
+// per contracts/events.md. payload carries the topic-specific fields.
+func (s *TaskService) emitAgentEvent(ctx context.Context, topic string, taskID *string, projectID, agentName, layer string, payload map[string]any) {
 	s.eventSvc.Emit(ctx, models.AuditEvent{
 		EventID:       newID("ev"),
 		SchemaVersion: "v1alpha",
 		ProjectID:     projectID,
-		Topic:         "agent.activated",
+		Topic:         topic,
 		ActorID:       agentName,
 		ActorRole:     roleForLayer(layer),
-		TaskID:        taskIDPtr,
+		TaskID:        taskID,
 		ParentTaskID:  nil,
 		GateID:        nil,
 		Timestamp:     time.Now().UTC().Format(time.RFC3339Nano),
-		Payload: map[string]any{
-			"agentName": agentName,
-			"layer":     layer,
-			"taskId":    taskID,
-		},
+		Payload:       payload,
 	})
 }
-
-// emitAgentIdle emits agent.idle.
-func (s *TaskService) emitAgentIdle(ctx context.Context, projectID, agentName, layer string) {
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	s.eventSvc.Emit(ctx, models.AuditEvent{
-		EventID:       newID("ev"),
-		SchemaVersion: "v1alpha",
-		ProjectID:     projectID,
-		Topic:         "agent.idle",
-		ActorID:       agentName,
-		ActorRole:     roleForLayer(layer),
-		TaskID:        nil,
-		ParentTaskID:  nil,
-		GateID:        nil,
-		Timestamp:     now,
-		Payload: map[string]any{
-			"agentName":  agentName,
-			"layer":      layer,
-			"idleSince":  now,
-		},
-	})
-}
-
-// emitAgentBlocked emits agent.blocked.
-func (s *TaskService) emitAgentBlocked(ctx context.Context, projectID, taskID, agentName, layer, reason string) {
-	taskIDPtr := &taskID
-	s.eventSvc.Emit(ctx, models.AuditEvent{
-		EventID:       newID("ev"),
-		SchemaVersion: "v1alpha",
-		ProjectID:     projectID,
-		Topic:         "agent.blocked",
-		ActorID:       agentName,
-		ActorRole:     roleForLayer(layer),
-		TaskID:        taskIDPtr,
-		ParentTaskID:  nil,
-		GateID:        nil,
-		Timestamp:     time.Now().UTC().Format(time.RFC3339Nano),
-		Payload: map[string]any{
-			"agentName": agentName,
-			"layer":     layer,
-			"taskId":    taskID,
-			"reason":    reason,
-		},
-	})
-}
-
-// harnessEnabled reports whether the agent-harness flag is on.
-func harnessEnabled() bool { return middleware.FeatureFlags.AgentHarness }

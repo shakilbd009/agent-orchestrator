@@ -11,25 +11,28 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-
 )
 
-// This file implements the DEV backend of the agent-execution harness:
-//   - Pi (`pi -p --mode json`) is the primary runtime. Its headless JSON output
-//     is newline-delimited JSON (NDJSON) with a stable lifecycle
-//     (session -> agent_start -> turn_start -> message_* -> turn_end ->
-//     agent_end -> agent_settled). Verified empirically against pi 0.83.0.
-//   - OpenCode (`opencode run`) is the fallback. It has no documented JSON mode,
-//     so the fallback reads stdout as text and infers completion from non-empty
-//     output. The interface is identical; only the line interpretation differs.
+// This file implements the DEV backend of the agent-execution harness. Both
+// runtimes emit newline-delimited JSON (NDJSON) on stdout and are parsed the
+// same way; only the per-record interpretation differs:
+//
+//   - Pi (`pi -p --mode json`) — primary. Stable lifecycle: session -> agent_start
+//     -> turn_start -> message_* -> turn_end -> agent_end -> agent_settled.
+//     Verified empirically against pi 0.83.0.
+//   - OpenCode (`opencode run --format json`) — fallback. Emits step_start / text /
+//     step_finish NDJSON; step_finish.part.reason == "stop" is the clean-stop
+//     signal. Verified empirically against opencode 1.18.10. NOTE: opencode's
+//     -s/--session means "session id to continue" (not "create if missing" like
+//     pi), so the fallback does not pass a session id on first run — opencode
+//     generates one. The pi backend retains durable sessions via --session-id.
 //
 // Both satisfy the runtime-agnostic Harness interface so the Phase F
 // provider-SDK-native backend can replace this without touching callers.
 
 // devHarness is the DEV Harness backend (pi primary, opencode fallback).
 type devHarness struct {
-	runtime  string // "pi" | "opencode"
-	lookPath func(file string) (string, error)
+	runtime string // "pi" | "opencode"
 	// buildCmd is the subprocess seam; defaults to exec.CommandContext. Injectable
 	// so Spawn can be unit-tested without a real pi/opencode process or LLM call.
 	buildCmd func(ctx context.Context, name string, args []string, dir string) cmdRunner
@@ -45,8 +48,8 @@ type cmdRunner interface {
 // execCmd wraps exec.CommandContext to satisfy cmdRunner.
 type execCmd struct{ *exec.Cmd }
 
-func (c *execCmd) Start() error            { return c.Cmd.Start() }
-func (c *execCmd) Wait() error             { return c.Cmd.Wait() }
+func (c *execCmd) Start() error { return c.Cmd.Start() }
+func (c *execCmd) Wait() error  { return c.Cmd.Wait() }
 func (c *execCmd) StdoutPipe() (io.ReadCloser, error) {
 	return c.Cmd.StdoutPipe()
 }
@@ -60,10 +63,10 @@ func NewDevHarness() (Harness, error) {
 
 func newDevHarnessWith(lookPath func(string) (string, error)) (Harness, error) {
 	if _, err := lookPath("pi"); err == nil {
-		return &devHarness{runtime: "pi", lookPath: lookPath, buildCmd: defaultBuildCmd}, nil
+		return &devHarness{runtime: "pi", buildCmd: defaultBuildCmd}, nil
 	}
 	if _, err := lookPath("opencode"); err == nil {
-		return &devHarness{runtime: "opencode", lookPath: lookPath, buildCmd: defaultBuildCmd}, nil
+		return &devHarness{runtime: "opencode", buildCmd: defaultBuildCmd}, nil
 	}
 	return nil, fmt.Errorf("no agent runtime found: install pi (primary) or opencode (fallback)")
 }
@@ -118,14 +121,14 @@ func (h *devHarness) Spawn(ctx context.Context, task HarnessTask, profile AgentP
 func (h *devHarness) commandFor(profile AgentProfile, prompt, sessionID, sessionDir string) (string, []string) {
 	switch h.runtime {
 	case "opencode":
-		args := []string{"run"}
+		// --format json yields step_start/text/step_finish NDJSON (M2). -s is
+		// deliberately omitted: opencode -s means "continue an existing session",
+		// not "create if missing" like pi's --session-id, so passing the derived
+		// slug on first run would error. opencode mints its own session id.
+		args := []string{"run", "--format", "json"}
 		if profile.Model != "" {
 			args = append(args, "-m", profile.Model)
 		}
-		if sessionID != "" {
-			args = append(args, "-s", sessionID)
-		}
-		// opencode run takes the message as trailing positional args.
 		args = append(args, prompt)
 		return "opencode", args
 	default: // pi
@@ -151,9 +154,9 @@ func (h *devHarness) commandFor(profile AgentProfile, prompt, sessionID, session
 }
 
 // stream reads worker stdout line by line and emits WorkerStep events. It tracks
-// just enough state (piState) to classify the terminal outcome in decideTerminal.
-func (h *devHarness) stream(ctx context.Context, stdout io.Reader, events chan<- WorkerEvent, task HarnessTask, profile AgentProfile) *piState {
-	st := &piState{runtime: h.runtime}
+// just enough state (runState) to classify the terminal outcome in decideTerminal.
+func (h *devHarness) stream(ctx context.Context, stdout io.Reader, events chan<- WorkerEvent, task HarnessTask, profile AgentProfile) *runState {
+	st := &runState{runtime: h.runtime}
 	sc := bufio.NewScanner(stdout)
 	// A single NDJSON record can be large (full message bodies); raise the limit.
 	sc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
@@ -174,33 +177,25 @@ func (h *devHarness) stream(ctx context.Context, stdout io.Reader, events chan<-
 	return st
 }
 
-// parseLine interprets one stdout line for the active runtime and updates state.
+// parseLine interprets one NDJSON line for the active runtime and updates state.
 // Returns a WorkerStep event when the line carries useful progress, nil otherwise.
-func (h *devHarness) parseLine(line []byte, st *piState, task HarnessTask, profile AgentProfile) *WorkerEvent {
-	if h.runtime != "pi" {
-		// opencode: accumulate text; no structured lifecycle to parse.
-		txt := string(line)
-		st.finalText += txt
-		if strings.TrimSpace(txt) == "" {
-			return nil
-		}
-		return &WorkerEvent{Kind: WorkerStep, TaskID: task.ID, AgentName: profile.Name, Layer: profile.Layer, Message: txt}
-	}
-
-	// pi: each line is one NDJSON record.
+func (h *devHarness) parseLine(line []byte, st *runState, task HarnessTask, profile AgentProfile) *WorkerEvent {
 	var rec map[string]any
 	if err := json.Unmarshal(line, &rec); err != nil {
 		// Not JSON (e.g. a stray banner line). Skip rather than fail the run.
 		return nil
 	}
+	if h.runtime == "opencode" {
+		return parseOpenCodeRecord(rec, st, task, profile)
+	}
 	return parsePiRecord(rec, st, task, profile)
 }
 
 // decideTerminal classifies the worker's final outcome from exit status + state.
-func (h *devHarness) decideTerminal(ctx context.Context, waitErr error, st *piState, task HarnessTask, profile AgentProfile) WorkerEvent {
+func (h *devHarness) decideTerminal(ctx context.Context, waitErr error, st *runState, task HarnessTask, profile AgentProfile) WorkerEvent {
 	base := WorkerEvent{TaskID: task.ID, AgentName: profile.Name, Layer: profile.Layer}
 
-	// Cancellation / timeout.
+	// Cancellation / timeout (B1: the per-task deadline cancels wctx).
 	if ctx.Err() != nil {
 		base.Kind = WorkerBlocked
 		base.Message = "worker timed out or was canceled"
@@ -219,44 +214,63 @@ func (h *devHarness) decideTerminal(ctx context.Context, waitErr error, st *piSt
 		return base
 	}
 
-	// Clean exit: completion requires non-empty evidence.
+	// Clean exit. Completion is decided from a structured signal, never from
+	// "stdout non-empty" (M2): that misclassifies failed-but-verbose runs as done.
 	finalText := ""
 	if st != nil {
 		finalText = st.finalText
 	}
+	if h.runtime == "opencode" {
+		// opencode: step_finish.part.reason == "stop" is the only clean-stop signal.
+		if st != nil && st.ocStopped {
+			base.Kind = WorkerCompleted
+			base.Summary = strings.TrimSpace(finalText)
+			return base
+		}
+		base.Kind = WorkerBlocked
+		if st != nil && st.ocStopReason != "" {
+			base.Message = "worker ended with stop reason: " + st.ocStopReason
+		} else {
+			base.Message = "worker ended without a clean stop signal"
+		}
+		return base
+	}
+
+	// pi: completion requires non-empty assistant output; clean exit with none -> idle.
 	if strings.TrimSpace(finalText) != "" {
 		base.Kind = WorkerCompleted
 		base.Summary = strings.TrimSpace(finalText)
 		return base
 	}
-	// Clean exit, nothing produced -> idle.
 	base.Kind = WorkerIdle
 	return base
 }
 
 // ---------------------------------------------------------------------------
-// Pi NDJSON record parsing. Stateful: the parser accumulates the assistant's
-// final text so decideTerminal can tell completion from idle.
+// NDJSON record parsing (pi + opencode). Stateful: each parser accumulates the
+// assistant's final text so decideTerminal can tell completion from idle/blocked.
 // ---------------------------------------------------------------------------
 
-// piState accumulates the bits of a pi run needed to classify its outcome.
-type piState struct {
-	runtime    string
-	sawAgentEnd bool
-	finalText   string
+// runState accumulates the bits of a run needed to classify its outcome.
+type runState struct {
+	runtime      string
+	finalText    string
+	sawTerminal  bool // pi: agent_end/agent_settled; opencode: step_finish
+	ocStopped    bool // opencode: step_finish.part.reason == "stop"
+	ocStopReason string
 }
 
 // parsePiRecord updates st from one pi NDJSON record and returns a WorkerStep
 // when the record carries visible progress (assistant text). Lifecycle markers
-// (agent_start/agent_end/agent_settled) only update state; they do not map to an
-// agent.* topic here — agent.activated is emitted by ActivateTask, and the
-// terminal agent.idle/agent.blocked are emitted by the supervisor from the
-// final WorkerEvent.
-func parsePiRecord(rec map[string]any, st *piState, task HarnessTask, profile AgentProfile) *WorkerEvent {
+// (agent_end/agent_settled) only update state; they do not map to an agent.*
+// topic here — agent.activated is emitted by ActivateTask, and the terminal
+// agent.idle/agent.blocked are emitted by the supervisor from the final
+// WorkerEvent.
+func parsePiRecord(rec map[string]any, st *runState, task HarnessTask, profile AgentProfile) *WorkerEvent {
 	typ, _ := rec["type"].(string)
 	switch typ {
 	case "agent_end", "agent_settled":
-		st.sawAgentEnd = true
+		st.sawTerminal = true
 		// agent_end may carry the final messages array; prefer its last assistant
 		// message text as the completion summary.
 		if msgs, ok := rec["messages"].([]any); ok {
@@ -287,6 +301,28 @@ func parsePiRecord(rec map[string]any, st *piState, task HarnessTask, profile Ag
 					return &WorkerEvent{Kind: WorkerStep, TaskID: task.ID, AgentName: profile.Name, Layer: profile.Layer, Message: c}
 				}
 			}
+		}
+	}
+	return nil
+}
+
+// parseOpenCodeRecord updates st from one opencode NDJSON record. The completion
+// signal is step_finish.part.reason == "stop" (M2). text parts carry output.
+func parseOpenCodeRecord(rec map[string]any, st *runState, task HarnessTask, profile AgentProfile) *WorkerEvent {
+	typ, _ := rec["type"].(string)
+	part, _ := rec["part"].(map[string]any)
+	switch typ {
+	case "text":
+		if txt, _ := part["text"].(string); txt != "" {
+			st.finalText += txt
+			return &WorkerEvent{Kind: WorkerStep, TaskID: task.ID, AgentName: profile.Name, Layer: profile.Layer, Message: txt}
+		}
+	case "step_finish":
+		st.sawTerminal = true
+		if reason, _ := part["reason"].(string); reason == "stop" {
+			st.ocStopped = true
+		} else {
+			st.ocStopReason = reason
 		}
 	}
 	return nil
@@ -343,7 +379,7 @@ var nonID = regexp.MustCompile(`[^a-zA-Z0-9_-]+`)
 
 // durableSessionID derives a stable session id for the agent's durable identity,
 // keyed by project + assignee. Stable across re-activations so the worker
-// resumes the same pi session.
+// resumes the same pi session. (opencode does not consume it — see commandFor.)
 func durableSessionID(task HarnessTask) string {
 	seed := task.ProjectID + "-" + task.Assignee
 	return nonID.ReplaceAllString(seed, "-")

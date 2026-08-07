@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/labstack/echo/v4"
@@ -84,6 +85,7 @@ func main() {
 	if h, err := service.NewDevHarness(); err == nil {
 		log.Printf("agent-harness: DEV backend = %s", h.Runtime())
 		taskSvc.SetHarness(h)
+		service.ConfigureHarness(envInt("AGENT_HARNESS_MAX_CONCURRENT", 6), envDuration("AGENT_HARNESS_TASK_TIMEOUT", 30*time.Minute))
 	} else {
 		log.Printf("agent-harness: disabled (%v)", err)
 	}
@@ -301,4 +303,30 @@ func runWebhookWorker(ctx context.Context, queue *event.WebhookQueue, repo *repo
 			queue.ProcessQueue(ctx)
 		}
 	}
+}
+
+// envInt reads a positive int env var, returning fallback otherwise.
+func envInt(key string, fallback int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return fallback
+	}
+	return n
+}
+
+// envDuration reads a duration env var (e.g. "45m", "2h"), returning fallback otherwise.
+func envDuration(key string, fallback time.Duration) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil || d <= 0 {
+		return fallback
+	}
+	return d
 }
