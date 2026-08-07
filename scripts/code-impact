@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# scripts/code-impact — dispatcher for the per-PR code-impact tool (spec §2).
+# Resolves BASE_REF/HEAD_REF, builds the Go core with the repo's pinned Go
+# (1.25.6, no separate toolchain), and emits a spliceable Markdown block
+# (Mermaid blast-radius + test-impact table) wrapped in the §3.2 idempotent
+# fence to stdout.
+#
+# Usage:
+#   scripts/code-impact                       # BASE_REF=origin/main HEAD_REF=HEAD
+#   BASE_REF=<ref> HEAD_REF=<ref> scripts/code-impact
+#   scripts/code-impact --base <ref> --head <ref>
+#   scripts/code-impact > body-block.md       # worker-embeddable (gh pr create --body-file)
+set -euo pipefail
+
+here="$(cd "$(dirname "$0")" && pwd)"
+go_dir="$here/code-impact-go"
+
+# Build the Go core into a temp dir (keeps the worktree clean; tiny program).
+bin_dir="$(mktemp -d)"
+trap 'rm -rf "$bin_dir"' EXIT
+bin="$bin_dir/code-impact-go"
+
+# ponytail: always rebuild — the program is tiny (<1s) and always-correct beats
+# a stale cache key. Add content-hash caching only if build time becomes felt.
+( cd "$go_dir" && go build -trimpath -o "$bin" . )
+
+# Point the Go core at the TS script (resolved relative to the binary otherwise).
+export CODE_IMPACT_TS="$here/code-impact-ts/index.js"
+
+# Forward any unknown flags (e.g. --base/--head, Phase-4 --cover-*) to the core.
+exec "$bin" "$@"
