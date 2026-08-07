@@ -77,10 +77,9 @@ func run(baseRef, headRef, tsScript string) error {
 	for _, f := range files {
 		switch {
 		case strings.HasSuffix(f, ".go"):
-			// skip the tool's own source so it never analyzes itself transitively
-			if !strings.HasPrefix(f, "scripts/code-impact-go/") {
-				goFiles = append(goFiles, f)
-			}
+			// NOTE: the tool's own main.go IS analyzable; the callersOf grep filter
+			// separately excludes self-hits, so no special-casing needed here.
+			goFiles = append(goFiles, f)
 		case strings.HasSuffix(f, ".ts"), strings.HasSuffix(f, ".svelte"):
 			if strings.HasSuffix(f, ".test.ts") || strings.HasSuffix(f, ".spec.ts") {
 				continue // ponytail: test files are dependents, not primary changed nodes
