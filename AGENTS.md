@@ -62,6 +62,8 @@ These versions were locked for Phase 0. Phase 1/2 updates require a new ADR.
 | Echo (Go) | `v4.15.2` | Import: `github.com/labstack/echo/v4` |
 | SvelteKit `sv` CLI | `0.15.3` | |
 | Playwright | `1.60.0` | Fetched via npx; browsers via `npx playwright install` |
+| Pi (`pi`) | `0.83.0` | Agent-execution harness DEV primary runtime (`pi -p --mode json`); headless NDJSON lifecycle |
+| OpenCode (`opencode`) | `1.18.10` | Harness DEV fallback runtime (`opencode run`); no JSON mode — text-mode adapter |
 
 ---
 

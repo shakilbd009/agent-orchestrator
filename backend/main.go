@@ -77,6 +77,17 @@ func main() {
 	// Initialize services
 	projectSvc := service.NewProjectService(projectRepo, eventSvc)
 	taskSvc := service.NewTaskService(taskRepo, projectRepo, eventSvc)
+
+	// Agent-execution harness (BRD-04+). DEV backend: pi primary, opencode fallback.
+	// Best-effort: if neither runtime is on PATH the harness stays nil and
+	// ActivateTask degrades to plain in_progress (manual coordination).
+	if h, err := service.NewDevHarness(); err == nil {
+		log.Printf("agent-harness: DEV backend = %s", h.Runtime())
+		taskSvc.SetHarness(h)
+	} else {
+		log.Printf("agent-harness: disabled (%v)", err)
+	}
+
 	gateSvc := service.NewGateService(gateRepo, eventSvc)
 	decompSvc := service.NewDecompositionService(decompRepo, taskRepo, eventSvc)
 	webhookSvc := service.NewWebhookService(webhookRepo, eventSvc)
@@ -146,6 +157,7 @@ func main() {
 	projects.GET("/:projectId/tasks/:taskId", h.GetProjectTask)
 	projects.POST("/:projectId/tasks/:taskId/block", h.BlockProjectTask)
 	projects.POST("/:projectId/tasks/:taskId/complete", h.CompleteProjectTask)
+	projects.POST("/:projectId/tasks/:taskId/activate", h.ActivateProjectTask)
 
 	// Task dependencies
 	projects.GET("/:projectId/tasks/:taskId/dependencies", h.GetTaskDependencies)
@@ -222,6 +234,9 @@ func loadFeatureFlags() {
 	}
 	if os.Getenv("FF_ENABLE_CLIENT_PORTAL") == "true" {
 		appmiddleware.FeatureFlags.ClientPortal = true
+	}
+	if os.Getenv("FF_ENABLE_AGENT_HARNESS") == "true" {
+		appmiddleware.FeatureFlags.AgentHarness = true
 	}
 	// NOTE: Comment CRUD is out-of-scope for BRD-03 Phase 1. Enable only when PM
 	// formally extends the contract. Until then the write surface is hidden.

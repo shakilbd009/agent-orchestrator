@@ -193,11 +193,17 @@ type TaskService struct {
 	repo        TaskRepo
 	projectRepo ProjectRepo
 	eventSvc    EventSvc
+	harness     Harness // optional; nil when the agent-harness flag is off / unconfigured
 }
 
 func NewTaskService(repo TaskRepo, projectRepo ProjectRepo, eventSvc EventSvc) *TaskService {
 	return &TaskService{repo: repo, projectRepo: projectRepo, eventSvc: eventSvc}
 }
+
+// SetHarness wires the agent-execution harness. Optional: when unset (or when
+// the agent-harness flag is off), ActivateTask moves a task to in_progress
+// without spawning a worker (manual coordination).
+func (s *TaskService) SetHarness(h Harness) { s.harness = h }
 
 func (s *TaskService) CreateTask(ctx context.Context, projectID string, req *models.OrchestrationTaskCreateRequest, actor *models.Actor) (*models.OrchestrationTask, error) {
 	if !middleware.FeatureFlags.PlatformOrchestration {
@@ -354,6 +360,81 @@ func (s *TaskService) CompleteTask(ctx context.Context, projectID, taskID string
 	})
 
 	return nil
+}
+
+// ActivateTask moves a task to in_progress and, when the agent-harness feature flag
+// is on, spawns a real worker (pi/opencode) for it. The worker streams lifecycle
+// events that the supervisor maps onto agent.activated/idle/blocked and
+// CompleteTask/BlockTask. It is the entry point of the agent-execution harness
+// (BRD-04+) and is wired to POST /projects/:projectId/tasks/:taskId/activate.
+func (s *TaskService) ActivateTask(ctx context.Context, projectID, taskID string, actor *models.Actor) (*models.OrchestrationTask, error) {
+	if !middleware.FeatureFlags.PlatformOrchestration {
+		return nil, fmt.Errorf("platform-orchestration flag must be enabled")
+	}
+
+	task, err := s.repo.GetTaskByID(ctx, projectID, taskID)
+	if err != nil || task == nil {
+		return nil, fmt.Errorf("task not found")
+	}
+	if task.Status == "done" || task.Status == "cancelled" {
+		return nil, fmt.Errorf("cannot activate task in terminal status %q", task.Status)
+	}
+
+	// Move to in_progress (emits task.status.changed via UpdateTaskStatus).
+	if task.Status != "in_progress" {
+		if err := s.UpdateTaskStatus(ctx, projectID, taskID, "in_progress", actor, "activated"); err != nil {
+			return nil, fmt.Errorf("activate task: %w", err)
+		}
+		task.Status = "in_progress"
+	}
+
+	// Spawn a worker only when the harness flag is on and a backend is wired.
+	if !harnessEnabled() || s.harness == nil {
+		return task, nil
+	}
+	if !markWorkerActive(taskID) {
+		// A worker is already running for this task; do not double-spawn.
+		return task, nil
+	}
+
+	profile := profileForTask(task)
+	layer := task.Layer
+	if layer == "" {
+		layer = profile.Layer
+	}
+	agentName := task.Assignee
+	if agentName == "" {
+		agentName = profile.Name
+	}
+
+	// agent.activated fires the moment we commit to spawning the worker.
+	s.emitAgentActivated(ctx, projectID, taskID, agentName, layer)
+
+	htask := HarnessTask{
+		ID:            task.ID,
+		ProjectID:     task.ProjectID,
+		Title:         task.Title,
+		Body:          task.Body,
+		Assignee:      task.Assignee,
+		Layer:         layer,
+		WorkspacePath: task.WorkspacePath,
+	}
+	wctx, cancel := context.WithCancel(context.Background())
+	events, err := s.harness.Spawn(wctx, htask, profile)
+	if err != nil {
+		cancel()
+		releaseWorker(taskID)
+		reason := "worker spawn failed: " + err.Error()
+		s.emitAgentBlocked(ctx, projectID, taskID, agentName, layer, reason)
+		_ = s.repo.BlockTask(ctx, projectID, taskID, reason, actor)
+		return task, nil
+	}
+	go func() {
+		defer cancel()
+		s.superviseWorker(wctx, projectID, taskID, agentName, layer, events)
+	}()
+
+	return task, nil
 }
 
 // GateService handles gate operations.

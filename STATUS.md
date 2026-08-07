@@ -1,7 +1,7 @@
 # STATUS.md — Agent Orchestrator Platform
 
 **Project:** agent-orchestrator  
-**Last Updated:** 2026-08-06 — Phase 2 (BRD-02/03) implemented; SSE live-update client repaired  
+**Last Updated:** 2026-08-06 — Phase 2 (BRD-02/03) implemented; SSE live-update client repaired; agent-execution harness adapter (Phase C) implemented behind `agent-harness` flag  
 **Governance Phase:** 2 — Core Delivery (Phase 0 + Phase 1 complete; BRD-02/03 shipped)  
 
 ---
@@ -33,6 +33,7 @@
 | **D-0011: No `version:` key in Docker Compose files** | Docker Compose warns or ignores `version:` in modern versions. | Removes a field that some teams use for documentation. | Version contract lives in `AGENTS.md` and `.env.example` instead. |
 | **D-0012: Browser-based acceptance testing with Playwright 1.60.0** | Phase 0 session confirmed Playwright available via npx. `sv add playwright` is the SvelteKit integration path. | Playwright test execution requires dev server running separately (not via `webServer` in config). | Dev server started in background; pattern documented in AGENTS.md. |
 | **D-0013: `ubuntu-latest` as default GitHub Actions runner** | Default for `setup-node` and most `gh` actions. No Windows or macOS runners needed in Phase 0. | No coverage of platform-specific behavior in CI. | Platform-specific tests can opt into matrix builds via ADR. |
+| **D-0014: Agent-execution harness is a runtime-agnostic adapter; DEV backend = Pi/OpenCode only; production provider-SDK-native backend deferred to Phase F** | Captain decision (Phase C): turn role-label agents into real executing processes that stream live activity. Pi (`pi -p --mode json`, verified NDJSON lifecycle) is primary; OpenCode (`opencode run`, text-mode fallback) is secondary. Never Claude/Codex. | OpenCode lacks a documented JSON mode → its fallback infers completion from non-empty stdout text. | Interface (`Harness.Spawn`) stays backend-agnostic so Phase F implements it unchanged. Gated by `agent-harness` flag; emits `agent.activated`/`idle`/`blocked` via the existing `EventService` and drives `CompleteTask`/`BlockTask`. |
 
 ---
 
@@ -45,7 +46,8 @@
 | Phase 2 BRD-02 orchestration pipeline | `developer` | Done |
 | Phase 2 BRD-03 client portal | `developer` | Done |
 | SSE live-update client repair (404 path + named-event dispatch) | crewmate | Done (this branch) |
-| Agent-execution harness + BRD-04/05/06 | TBD | Not started |
+| Agent-execution harness adapter (Phase C) — runtime-agnostic interface + DEV pi/opencode backend, `agent.activated`/`agent.idle`/`agent.blocked` + `CompleteTask`/`BlockTask` wiring, behind `agent-harness` flag | crewmate | Implemented (`fm/orchestrator-harness-adapter`) |
+| Agent-execution harness production backend (provider-SDK-native) | TBD | Phase F — not built |
 
 ---
 
@@ -58,7 +60,7 @@
 | BRD-04 | Agent Workstream Dashboard | Not started (placeholder) | — |
 | BRD-05 | LLM Provider Integration | Not started (placeholder) | `specs/curated/BRD-05-llm-provider.md` |
 | BRD-06 | Agent Memory and State | Not started (placeholder) | `specs/curated/BRD-06-agent-memory.md` |
-| — | Agent-execution harness | Not started | — |
+| — | Agent-execution harness | Implemented (DEV backend) | `backend/internal/service/harness.go`, `harness_dev.go`; Phase F SDK-native backend pending |
 
 ---
 

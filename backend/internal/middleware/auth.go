@@ -28,6 +28,7 @@ var FeatureFlags = models.FeatureFlags{
 	HumanGates:            false,
 	AuditTrail:            false,
 	ClientPortal:          false,
+	AgentHarness:          false, // BRD-04+: agent-execution harness (pi/opencode DEV backend)
 }
 
 // RequireFeatureGate returns a middleware that blocks requests when the flag is disabled.
@@ -49,6 +50,8 @@ func RequireFeatureGate(flagName string) echo.MiddlewareFunc {
 				enabled = FeatureFlags.AuditTrail
 			case "client-portal":
 				enabled = FeatureFlags.ClientPortal
+			case "agent-harness":
+				enabled = FeatureFlags.AgentHarness
 			}
 			if !enabled {
 				return c.JSON(http.StatusForbidden, models.Error{
