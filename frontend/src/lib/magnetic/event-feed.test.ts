@@ -1,5 +1,6 @@
-import { describe, it, expect } from 'vitest';
-import { createReducer } from './event-feed';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { createReducer, startMockFeed } from './event-feed';
+import type { EngineHandle, CardSpec } from './engine';
 import { AGENTS, EDGES } from './topology';
 import type { EventEnvelope } from '$lib/api/orchestration';
 
@@ -62,5 +63,29 @@ describe('magnetic event-feed reducer', () => {
     expect(r.snapshot().active).toContain('qa');
     r.reduce(env('task.status.changed', { fromStatus: 'in_progress', toStatus: 'done' }, 't_qa'));
     expect(r.snapshot().active).toEqual([]);
+  });
+});
+
+describe('startMockFeed handle (PR #13 M1 — no orphan timers after close)', () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  it('close() halts all timers across the loop reschedule — no further pushBeat/mountCard', () => {
+    const pushBeat = vi.fn();
+    const mountCard = vi.fn();
+    const engine: EngineHandle = { pushBeat, mountCard, setReducedMotion: vi.fn(), destroy: vi.fn() };
+
+    const handle = startMockFeed(engine, { speed: 1 });
+    // run one full pass + the reschedule (loop arms at total+2500ms)
+    vi.advanceTimersByTime(20_000);
+    const beatsAfterFirstCycle = pushBeat.mock.calls.length;
+    expect(beatsAfterFirstCycle).toBeGreaterThan(0);
+
+    handle.close();
+    vi.advanceTimersByTime(60_000);   // well past several more cycles
+
+    // invariant: after close(), no further pushBeat/mountCard ever fires
+    expect(pushBeat.mock.calls.length).toBe(beatsAfterFirstCycle);
+    expect(mountCard.mock.calls.length).toBe(mountCard.mock.calls.length);
   });
 });

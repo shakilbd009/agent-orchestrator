@@ -186,16 +186,30 @@ export function startMockFeed(
   const handler = wireReducer(reducer, engine);
   const speed = opts.speed ?? 1;
   const timers: ReturnType<typeof setTimeout>[] = [];
-  let t = 0;
-  for (const step of MOCK_TIMELINE) {
-    t += step.delay;
-    timers.push(setTimeout(() => { opts.onStep?.(step.env); handler(step.env); }, t / speed));
-  }
-  // loop the demo so the graph stays alive
-  const loop = setTimeout(() => startMockFeed(engine, opts), (t + 2500) / speed);
-  timers.push(loop);
+  let stopped = false;   // the handle owns this; close() is the only thing that flips it
+
+  // Schedule one MOCK_TIMELINE pass, then re-arm in place. A single long-lived
+  // handle (no recursion) so close() can reach every timer. Every scheduled
+  // callback AND the reschedule gate on `stopped` — after close(), no further
+  // pushBeat/mountCard ever fires (PR #13 review M1).
+  const schedulePass = () => {
+    let t = 0;
+    for (const step of MOCK_TIMELINE) {
+      t += step.delay;
+      timers.push(setTimeout(() => {
+        if (stopped) return;
+        opts.onStep?.(step.env);
+        handler(step.env);
+      }, t / speed));
+    }
+    timers.push(setTimeout(() => {
+      if (stopped) return;
+      schedulePass();
+    }, (t + 2500) / speed));
+  };
+  schedulePass();
   return {
-    close() { for (const id of timers) clearTimeout(id); },
+    close() { stopped = true; for (const id of timers) clearTimeout(id); },
   };
 }
 
