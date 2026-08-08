@@ -11,7 +11,7 @@
 ```mermaid
 flowchart LR
     subgraph Browser["Browser (SPA bundles)"]
-        orchestration-ui["Orchestration dashboard (SvelteKit)"]
+        orchestration-ui["Orchestration dashboard (SvelteKit): board, gates, live magnetic graph"]
         client-portal-ui["Client portal (SvelteKit)"]
     end
 
@@ -58,7 +58,7 @@ flowchart LR
 
 | ID | Kind | Domain | Responsibility | Owned paths | Public contracts / trust boundaries | Allowed outgoing dependencies |
 |---|---|---|---|---|---|---|
-| `orchestration-ui` | UI | product (orchestration) | Internal orchestration dashboard: board, gates, decomposition, webhooks, live SSE event feed. Browser bundle. | `frontend/src/routes/orchestration/**`, `frontend/src/routes/+layout.svelte`, `frontend/src/routes/+page.svelte`, `frontend/src/lib/api/**` (shared TS API/SSE client — also used by `client-portal-ui`), `frontend/src/lib/orchestration/**` | Consumes BRD-02 REST + SSE; reads `VITE_FF_ENABLE_PLATFORM_ORCHESTRATION`. Trust boundary: browser → backend over `X-Actor-ID` / `X-Actor-Role` headers. | `orchestration-api`, `frontend-shell` |
+| `orchestration-ui` | UI | product (orchestration) | Internal orchestration dashboard: board, gates, decomposition, webhooks, live SSE event feed, and a **live magnetic graph** (`/orchestration/live`) that visualizes real agent activity as emergent spring/focal clusters driven by the SSE stream. Browser bundle. | `frontend/src/routes/orchestration/**`, `frontend/src/routes/+layout.svelte`, `frontend/src/routes/+page.svelte`, `frontend/src/lib/api/**` (shared TS API/SSE client — also used by `client-portal-ui`), `frontend/src/lib/orchestration/**`, `frontend/src/lib/magnetic/**` (living-graph engine + SSE event-feed reducer + deterministic agent homes) | Consumes BRD-02 REST + SSE; reads `VITE_FF_ENABLE_PLATFORM_ORCHESTRATION`. Trust boundary: browser → backend over `X-Actor-ID` / `X-Actor-Role` headers. The magnetic graph reuses the shared SSE client (no new transport/contract) and the DEV harness's `agent.*`/`handoff.*` topics. | `orchestration-api`, `frontend-shell` |
 | `client-portal-ui` | UI | client-portal | Client-facing portal: portfolio, project detail, approval inbox/decide, search. Browser bundle. | `frontend/src/routes/client-portal/**`, `frontend/src/lib/client-portal/**` | Consumes BRD-03 REST; reads `VITE_FF_ENABLE_CLIENT_PORTAL`. Trust boundary: browser → backend over `X-Actor-*` headers; client principal asserted by header. | `client-portal-bff`, `frontend-shell` |
 | `frontend-shell` | service | product | Static SPA host + build pipeline. Node file server (`server.js`) serves the SvelteKit `build/`; Vite/SvelteKit build config. | `frontend/server.js`, `frontend/Dockerfile`, `frontend/svelte.config.js`, `frontend/vite.config.ts`, `frontend/vitest.config.ts`, `frontend/package.json`, `frontend/pnpm-lock.yaml`, `frontend/tsconfig.json`, `frontend/static/**`, `frontend/src/app.html`, `frontend/src/app.d.ts`, `frontend/src/lib/index.ts`, `frontend/src/lib/assets/**`, `frontend/src/test-utils/**`, `frontend/src/vitest-setup.ts` | Serves static assets on `:5173`; no server logic. | none (serves files) |
 | `orchestration-api` | service | orchestration | BRD-02 platform-native orchestration pipeline: project/task CRUD, task dependencies, task + phase gates, decomposition proposals, webhook registration, handoff evidence, SSE stream, health/ready/live. Hosts the shared pgx `repository.Pool`. | `backend/main.go` (process entry, DI wiring, `runMigrations`), `backend/internal/handler/handlers.go`, `backend/internal/service/orchestration.go`, `backend/internal/repository/project.go`, `backend/internal/repository/task.go`, `backend/internal/repository/gate.go`, `backend/internal/repository/decomposition.go`, `backend/internal/repository/webhook.go`, `backend/internal/models/models.go`, `backend/main_test.go`, `backend/internal/handler/handlers_test.go`, `backend/internal/repository/task_cycle_test.go`, `backend/Dockerfile`, `backend/go.mod`, `backend/go.sum` | REST contract: `contracts/openapi.yaml` (project/task/gate/decomposition/webhook/handoff). SSE: `GET /projects/:projectId/events/stream` (`Last-Event-ID` catch-up, ≤50 clients/project). Phase-gate advancement requires `human` role. | `postgres`, `event-bus`, `auth-gate`, `agent-harness-dev` (when `agent-harness` flag on) |
@@ -132,3 +132,13 @@ boundary change.
   `orchestration-api`'s `repository/project.go`) is imported by
   `client-portal-bff` repos. A future refactor could lift it into a shared
   platform package; today it is a tolerated cross-domain code dependency.
+- **Magnetic graph is a faithful engine port.** `orchestration-ui` ships a
+  living-graph visualization (`frontend/src/lib/magnetic/**`, route
+  `/orchestration/live`) ported from the AgentArks reference engine; its spring /
+  repulsion / focal-attraction physics is byte-faithful, but the scripted beat
+  cassette is replaced by a live SSE event-feed reducer
+  (`event-feed.ts` → `engine.pushBeat`) consuming the existing `agent.*` /
+  `handoff.*` topics via the shared SSE client — no new transport or contract.
+  When no backend/SSE is reachable the page drives the same reducer from a
+  scripted mock fixture (`startMockFeed`) so the wiring is demonstrable without
+  Postgres+Redis. This is additive UI only (no approval boundary crossed).

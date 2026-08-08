@@ -78,6 +78,7 @@
   const navItems = [
     { href: '/orchestration', label: 'Projects' },
     { href: '/orchestration/board', label: 'Board' },
+    { href: '/orchestration/live', label: 'Live' },
     { href: '/orchestration/decomposition', label: 'Decomposition' },
     { href: '/orchestration/gates', label: 'Gates' },
     { href: '/orchestration/webhooks', label: 'Webhooks' },
