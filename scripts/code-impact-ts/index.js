@@ -13,6 +13,7 @@
 
 const { execFileSync } = require("child_process");
 const fs = require("fs");
+const path = require("path");
 
 function main() {
   const args = parseArgs(process.argv.slice(2));
@@ -63,7 +64,22 @@ function main() {
       });
     }
   }
-  process.stdout.write(JSON.stringify({ nodes, edges, note: "" }));
+  // prototype §5.3: per-changed-route sibling/parent context + per-changed-file
+  // import targets, exposed in the same JSON contract for the roots view.
+  const routes = [];
+  const imports = [];
+  const changedSet = new Set(files);
+  for (const file of files) {
+    if (!isRoutePageFile(file)) continue;
+    const parentLayout = findAncestorLayout(path.posix.dirname(file), base, file);
+    const siblings = parentLayout ? routeSiblings(parentLayout, base, file) : [];
+    routes.push({ file, parentLayout, siblings });
+  }
+  for (const file of files) {
+    const targets = importTargets(file, head, changedSet);
+    if (targets.length) imports.push({ from: file, targets });
+  }
+  process.stdout.write(JSON.stringify({ nodes, edges, note: "", routes, imports }));
 }
 
 function parseArgs(argv) {
@@ -175,6 +191,99 @@ function readDisk(file) {
   } catch {
     return "";
   }
+}
+
+// ---------------- roots-view context (prototype §5.2.2 / §5.3) ----------------
+// Faithful per §5.4: only real files at BASE_REF (siblings/parent layouts) or
+// real import targets of a changed file. No speculative "related modules."
+
+function isRoutePageFile(file) {
+  return file.startsWith("frontend/src/routes/") && /\/\+page\.svelte$/.test(file);
+}
+
+function isTestFileName(file) {
+  return /\.test\.[tj]sx?$|\.spec\.[tj]sx?$|\.test\.svelte$/.test(file);
+}
+
+function blobExists(ref, file) {
+  return !!gitShow(ref, file);
+}
+
+function lsDir(ref, dir) {
+  try {
+    const out = execFileSync("git", ["ls-tree", "--name-only", ref, "--", dir + "/"], { encoding: "utf8" });
+    return out.split("\n").map((s) => s.trim()).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+// nearest ancestor +layout.svelte at BASE that is NOT the file itself (§5.2.2).
+function findAncestorLayout(dir, base, selfFile) {
+  const root = "frontend/src/routes";
+  let d = dir;
+  while (true) {
+    const cand = d + "/+layout.svelte";
+    if (cand !== selfFile && blobExists(base, cand)) return cand;
+    if (d === root) break;
+    const i = d.lastIndexOf("/");
+    if (i < root.length) break;
+    d = d.slice(0, i);
+  }
+  return "";
+}
+
+// sibling routes sharing parentLayout at BASE: the layout's own +page plus its
+// subdirectory routes (e.g. board/+page.svelte under orchestration/+layout.svelte).
+// ls-tree returns full repo paths, so derive the entry name by stripping the dir.
+function routeSiblings(parentLayout, base, selfFile) {
+  const dir = path.posix.dirname(parentLayout);
+  const out = [];
+  for (const full of lsDir(base, dir)) {
+    if (full === selfFile) continue;
+    const e = full.startsWith(dir + "/") ? full.slice(dir.length + 1) : full;
+    if (/^\+page\.(svelte|ts|js)$/.test(e)) {
+      if (!isTestFileName(full)) out.push(full);
+    } else if (!e.includes(".")) {
+      const sub = full + "/+page.svelte";
+      if (blobExists(base, sub) && !isTestFileName(sub)) out.push(sub);
+    }
+  }
+  return out.sort();
+}
+
+// resolved import targets of `file` that are real repo modules NOT in the
+// changed set (§5.2.2: the reused existing roots, e.g. event-feed.ts → api/client.ts).
+function importTargets(file, head, changedSet) {
+  const src = gitShow(head, file) || readDisk(file);
+  if (!src) return [];
+  const out = [];
+  const seen = new Set();
+  const re = /import\s+(?:[\s\S]*?\s+from\s+)?['"]([^'"]+)['"]/g;
+  let m;
+  while ((m = re.exec(src)) !== null) {
+    const resolved = resolveModule(file, m[1], head);
+    if (!resolved || changedSet.has(resolved) || seen.has(resolved)) continue;
+    seen.add(resolved);
+    const exps = [...parseExports(gitShow(head, resolved) || readDisk(resolved))].slice(0, 3);
+    out.push({ file: resolved, exports: exps });
+  }
+  return out;
+}
+
+function resolveModule(importer, spec, head) {
+  let base;
+  if (spec.startsWith("$lib/")) {
+    base = "frontend/src/lib/" + spec.slice("$lib/".length);
+  } else if (spec.startsWith("./") || spec.startsWith("../")) {
+    base = path.posix.join(path.posix.dirname(importer), spec);
+  } else {
+    return ""; // bare/3rd-party (svelte, $app/*) — not a repo module
+  }
+  for (const cand of [base + ".ts", base + ".svelte", base + ".js", base + "/index.ts", base + "/index.js"]) {
+    if (blobExists(head, cand)) return cand;
+  }
+  return "";
 }
 
 main();

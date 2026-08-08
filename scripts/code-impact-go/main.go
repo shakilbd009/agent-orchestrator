@@ -42,16 +42,18 @@ func main() {
 		baseRef  = envOr("BASE_REF", "origin/main")
 		headRef  = envOr("HEAD_REF", "HEAD")
 		tsScript = envOr("CODE_IMPACT_TS", "") // optional override; default resolved next to this binary
+		view     = envOr("VIEW", "auto")        // §5.1: roots|blast|auto
 		showHelp bool
 	)
 	flag.StringVar(&baseRef, "base", baseRef, "BASE_REF (default origin/main)")
 	flag.StringVar(&headRef, "head", headRef, "HEAD_REF (default HEAD)")
+	flag.StringVar(&view, "view", view, "view: roots|blast|auto (auto = roots for additive PRs with established context, else blast)")
 	// ponytail: --cover-go/--cover-ts are Phase 4 (coverage wiring). Stubbed on purpose.
 	flag.Bool("cover-go", false, "Phase 4 — stubbed (coverage not wired yet)")
 	flag.Bool("cover-ts", false, "Phase 4 — stubbed (coverage not wired yet)")
 	flag.BoolVar(&showHelp, "h", false, "show usage")
 	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "usage: code-impact-go [-base BASE_REF] [-head HEAD_REF]")
+		fmt.Fprintln(os.Stderr, "usage: code-impact-go [-base BASE_REF] [-head HEAD_REF] [-view roots|blast|auto]")
 	}
 	flag.Parse()
 	if showHelp {
@@ -59,14 +61,14 @@ func main() {
 		os.Exit(0)
 	}
 
-	if err := run(baseRef, headRef, tsScript); err != nil {
+	if err := run(baseRef, headRef, tsScript, view); err != nil {
 		// ponytail: never hide a failure behind exit 0; fail loud (AGENTS Rule 12).
 		fmt.Fprintf(os.Stderr, "code-impact-go: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(baseRef, headRef, tsScript string) error {
+func run(baseRef, headRef, tsScript, viewReq string) error {
 	if !gitExists() {
 		return fmt.Errorf("git not found on PATH")
 	}
@@ -105,12 +107,15 @@ func run(baseRef, headRef, tsScript string) error {
 
 	// Frontend slice (§2.2): delegate to the Node script, parse its JSON.
 	if len(tsFiles) > 0 {
-		tsNodes, tsEdges, note, err := runTSScript(tsScript, baseRef, headRef, tsFiles)
+		tsNodes, tsEdges, tsRoutes, tsImports, note, err := runTSScript(tsScript, baseRef, headRef, tsFiles)
 		if err != nil {
 			// ponytail: degrade gracefully — node may be absent on a minimal runner.
 			// Backend diagram still ships; flag loudly in the output.
 			graph.notes = append(graph.notes, "frontend analysis skipped: "+err.Error())
 		} else {
+			// roots-view context (prototype §5.2.2): route spine + reused import targets.
+			graph.routes = tsRoutes
+			graph.imports = tsImports
 			for _, n := range tsNodes {
 				graph.addNode(n)
 			}
@@ -121,7 +126,15 @@ func run(baseRef, headRef, tsScript string) error {
 		}
 	}
 
-	out := graph.render(defaultCap)
+	// §5.1 view selection: explicit --view wins; auto picks roots for additive
+	// PRs with honest established context, else blast (unchanged).
+	chosen := chooseView(viewReq, graph)
+	var out string
+	if chosen == "roots" {
+		out = graph.renderRoots(defaultCap)
+	} else {
+		out = graph.render(defaultCap)
+	}
 	// spec §3.2 idempotent splice fence — worker-embeddable.
 	fmt.Println("<!--code-impact:start-->")
 	fmt.Print(out)
@@ -154,11 +167,34 @@ type edge struct {
 	dashed                bool
 }
 
+// routeCtx — per changed SvelteKit route page, its parent layout + sibling
+// routes at BASE_REF (prototype §5.2.2 frontend existing-context surfacing).
+// Sourced from the TS slice's directory listing; faithful per §5.4 (real repo
+// tree only — never speculative "related modules").
+type routeCtx struct {
+	File, ParentLayout string   // full repo paths
+	Siblings           []string // full repo paths, excludes the changed file
+}
+
+// importCtx — per changed file, its resolved import targets that are NOT
+// themselves changed (prototype §5.2.2: the reused existing roots, e.g.
+// event-feed.ts → api/client.ts). Real repo modules only.
+type importCtx struct {
+	From    string
+	Targets []importTarget
+}
+type importTarget struct {
+	File    string
+	Exports []string
+}
+
 type graph struct {
 	nodes map[string]*node
 	order []string // insertion order for stable output
 	edges []edge
 	notes []string
+	routes        []routeCtx  // frontend route context (roots view)
+	imports       []importCtx // frontend import-target context (roots view)
 	callOverflow map[string]int // per-source overflow count for the "… +N more" summary
 }
 
@@ -475,13 +511,28 @@ type tsEdgeJSON struct {
 	Label string `json:"label"`
 	Kind  string `json:"kind"`
 }
+type tsRouteJSON struct {
+	File        string   `json:"file"`
+	ParentLayout string  `json:"parentLayout"`
+	Siblings    []string `json:"siblings"`
+}
+type tsImportTargetJSON struct {
+	File    string   `json:"file"`
+	Exports []string `json:"exports"`
+}
+type tsImportJSON struct {
+	From    string               `json:"from"`
+	Targets []tsImportTargetJSON `json:"targets"`
+}
 type tsOut struct {
-	Nodes []tsNodeJSON `json:"nodes"`
-	Edges []tsEdgeJSON `json:"edges"`
-	Note  string       `json:"note"`
+	Nodes   []tsNodeJSON  `json:"nodes"`
+	Edges   []tsEdgeJSON  `json:"edges"`
+	Routes  []tsRouteJSON `json:"routes"`
+	Imports []tsImportJSON `json:"imports"`
+	Note    string        `json:"note"`
 }
 
-func runTSScript(override, base, head string, files []string) (nodes []*node, edges []edge, note string, err error) {
+func runTSScript(override, base, head string, files []string) (nodes []*node, edges []edge, routes []routeCtx, imports []importCtx, note string, err error) {
 	script := override
 	if script == "" {
 		exe, e := os.Executable()
@@ -493,7 +544,7 @@ func runTSScript(override, base, head string, files []string) (nodes []*node, ed
 		}
 	}
 	if _, e := os.Stat(script); e != nil {
-		return nil, nil, "", fmt.Errorf("ts script missing: %s", script)
+		return nil, nil, nil, nil, "", fmt.Errorf("ts script missing: %s", script)
 	}
 	args := []string{script, "-base", base, "-head", head}
 	args = append(args, files...)
@@ -502,12 +553,12 @@ func runTSScript(override, base, head string, files []string) (nodes []*node, ed
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if e := cmd.Run(); e != nil {
-		return nil, nil, "", fmt.Errorf("node: %v (%s)", e, strings.TrimSpace(stderr.String()))
+		return nil, nil, nil, nil, "", fmt.Errorf("node: %v (%s)", e, strings.TrimSpace(stderr.String()))
 	}
 	var o tsOut
 	// the script prints one JSON object; tolerate trailing whitespace.
 	if e := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &o); e != nil {
-		return nil, nil, "", fmt.Errorf("parse ts json: %v", e)
+		return nil, nil, nil, nil, "", fmt.Errorf("parse ts json: %v", e)
 	}
 	for _, n := range o.Nodes {
 		nodes = append(nodes, &node{
@@ -518,7 +569,19 @@ func runTSScript(override, base, head string, files []string) (nodes []*node, ed
 	for _, e := range o.Edges {
 		edges = append(edges, edge{from: e.From, to: e.To, label: "imports", kind: "imports"})
 	}
-	return nodes, edges, o.Note, nil
+	for _, r := range o.Routes {
+		sibs := make([]string, len(r.Siblings))
+		copy(sibs, r.Siblings)
+		routes = append(routes, routeCtx{File: r.File, ParentLayout: r.ParentLayout, Siblings: sibs})
+	}
+	for _, im := range o.Imports {
+		var tgts []importTarget
+		for _, t := range im.Targets {
+			tgts = append(tgts, importTarget{File: t.File, Exports: t.Exports})
+		}
+		imports = append(imports, importCtx{From: im.From, Targets: tgts})
+	}
+	return nodes, edges, routes, imports, o.Note, nil
 }
 
 // ---------------- rendering (capped neighborhood, spec §2 + §1 colors) ----------------
@@ -711,6 +774,369 @@ func (g *graph) testImpactTable() string {
 	}
 	b.WriteString("\n")
 	return b.String()
+}
+
+// ---------------- root-system view (prototype §5) ----------------
+//
+// renderRoots is the additive-PR view: a rooted flowchart TD that surfaces the
+// ESTABLISHED gray roots (parent layouts, sibling routes, reused import
+// targets) the PR grafts onto, marks the graft point amber, and adds a legend.
+// Layered on the SAME static analysis as blast — no new analyzer, no new deps
+// (§5.3). Faithfulness (§5.4): every gray node is a real file at BASE_REF or a
+// real import target of a changed file; nothing speculative.
+
+func (g *graph) renderRoots(cap int) string {
+	// 1. Surface existing context (§5.2.2): shells/layouts/siblings/import-targets.
+	g.surfaceRootsContext()
+
+	changed, ctx := g.partitionRoots()
+	included, notes := g.capRoots(changed, ctx, cap)
+
+	// declaration order: spine (shells+layouts) → changed growth → gray context.
+	var spine, sibCtx, tgtCtx, otherCtx, declOrder []string
+	for _, k := range ctx {
+		n := g.nodes[k]
+		switch {
+		case strings.HasPrefix(k, "ctx::shell::") || isRouteLayout(n.file):
+			spine = append(spine, k)
+		case isRoutePage(n.file):
+			sibCtx = append(sibCtx, k)
+		case isImportTargetKey(k, g.imports):
+			tgtCtx = append(tgtCtx, k)
+		default:
+			otherCtx = append(otherCtx, k)
+		}
+	}
+	declOrder = append(declOrder, spine...)
+	declOrder = append(declOrder, changed...)
+	declOrder = append(declOrder, sibCtx...)
+	declOrder = append(declOrder, tgtCtx...)
+	declOrder = append(declOrder, otherCtx...)
+
+	var b strings.Builder
+	b.WriteString("```mermaid\n")
+	b.WriteString("flowchart TD\n") // §5.2.1 rooted top-down
+	b.WriteString("  classDef add fill:#d7f5dd,stroke:#2e7d32,stroke-width:2px,color:#1b5e20;\n")
+	b.WriteString("  classDef mod fill:#ffe8b3,stroke:#b8860b,stroke-width:2px,color:#7a5a00;\n")
+	b.WriteString("  classDef rem fill:#ffd6d6,stroke:#c62828,stroke-width:2px,color:#b71c1c;\n")
+	b.WriteString("  classDef ctx fill:#eeeeee,stroke:#9e9e9e,color:#555;\n")
+
+	idOf := map[string]string{}
+	idx := 0
+	for _, k := range declOrder {
+		if !included[k] {
+			continue
+		}
+		n := g.nodes[k]
+		if n.isTest {
+			continue
+		}
+		idx++
+		id := fmt.Sprintf("n%d", idx)
+		idOf[k] = id
+		cls := n.change
+		if cls == "" {
+			cls = classCtx
+		}
+		b.WriteString(fmt.Sprintf("  %s[%q]:::%s;\n", id, rootsLabel(n), cls))
+	}
+
+	// edges (unlabeled — attachment topology over edge-type precision, §4): both
+	// endpoints included & non-test. Dedup identical from→to (multiple changed
+	// routes share a layout/shell edge).
+	seen := map[string]bool{}
+	for _, e := range g.edges {
+		fn, tn := g.nodes[e.from], g.nodes[e.to]
+		if !included[e.from] || !included[e.to] || (fn != nil && fn.isTest) || (tn != nil && tn.isTest) {
+			continue
+		}
+		pair := e.from + ">" + e.to
+		if seen[pair] {
+			continue
+		}
+		seen[pair] = true
+		b.WriteString(fmt.Sprintf("  %s --> %s;\n", idOf[e.from], idOf[e.to]))
+	}
+
+	// §5.2.4 legend subgraph — four fixed swatches, one per classDef.
+	b.WriteString("  subgraph Legend[\"Legend — root-system colors\"]\n")
+	b.WriteString("    direction LR\n")
+	b.WriteString("    lgAdd[\"new growth (PR addition)\"]:::add;\n")
+	b.WriteString("    lgMod[\"graft point (PR modification)\"]:::mod;\n")
+	b.WriteString("    lgRem[\"removed\"]:::rem;\n")
+	b.WriteString("    lgCtx[\"established root (existing code)\"]:::ctx;\n")
+	b.WriteString("  end\n")
+	b.WriteString("```\n\n")
+	// §5.2.4 Markdown legend fallback (belt-and-suspenders).
+	b.WriteString("_🟩 green = PR addition (new growth) · 🟨 amber = PR modification (graft point) · 🟥 red = removal · ⬜ gray = existing code (established root)._\n\n")
+
+	b.WriteString(g.testImpactTable())
+	for _, nt := range notes {
+		b.WriteString("_" + nt + "_\n")
+	}
+	return b.String()
+}
+
+// surfaceRootsContext adds the established-root gray nodes + graft edges the
+// blast view lacks (prototype §3 failures 1–3). Non-clobbering: never
+// downgrades a real change node to ctx, never overwrites its label, so a
+// modified +layout.svelte stays the amber graft point.
+func (g *graph) surfaceRootsContext() {
+	for _, r := range g.routes {
+		if r.ParentLayout == "" {
+			continue
+		}
+		layKey := "ts::" + r.ParentLayout
+		g.ensureCtx(layKey, shortRouteFile(r.ParentLayout), r.ParentLayout, "svelte", nil)
+
+		// graft-point edge: parent layout → child route — the route-containment
+		// edge today's import-only scanner misses (§3 failure 2 / §5.2.3).
+		if childKey := "ts::" + r.File; g.hasNode(childKey) {
+			g.edges = append(g.edges, edge{from: layKey, to: childKey, kind: "contains"})
+		}
+		// gray sibling routes sharing this layout (§5.2.2).
+		for _, s := range r.Siblings {
+			sibKey := "ts::" + s
+			g.ensureCtx(sibKey, shortRouteFile(s), s, langOf(s), nil)
+			g.edges = append(g.edges, edge{from: layKey, to: sibKey, kind: "contains"})
+		}
+		// conceptual shell root = the layout's route directory (§5.2.1 single root).
+		shellDir := shellDirOf(r.ParentLayout) // routes/orchestration
+		shellKey := "ctx::shell::" + shellDir
+		g.ensureCtx(shellKey, lastSegment(shellDir)+" UI shell", shellDir, "svelte", nil)
+		g.edges = append(g.edges, edge{from: shellKey, to: layKey, kind: "contains"})
+	}
+	// reused import targets (§5.2.2): changed file → existing gray module.
+	for _, im := range g.imports {
+		fromKey := "ts::" + im.From
+		for _, t := range im.Targets {
+			tgtKey := "ts::" + t.File
+			g.ensureCtx(tgtKey, strings.TrimPrefix(t.File, "frontend/src/"), t.File, langOf(t.File), t.Exports)
+			g.edges = append(g.edges, edge{from: fromKey, to: tgtKey, kind: "imports"})
+		}
+	}
+}
+
+// ensureCtx adds a ctx node only if absent — never clobbers an existing node.
+func (g *graph) ensureCtx(key, label, file, lang string, exports []string) {
+	if g.hasNode(key) {
+		return
+	}
+	g.addNode(&node{key: key, label: label, file: file, lang: lang, change: classCtx, exports: exports})
+}
+
+// partitionRoots returns changed vs ctx non-test node keys in insertion order.
+func (g *graph) partitionRoots() (changed, ctx []string) {
+	for _, k := range g.order {
+		n := g.nodes[k]
+		if n.isTest {
+			continue
+		}
+		if n.change != "" && n.change != classCtx {
+			changed = append(changed, k)
+		} else {
+			ctx = append(ctx, k)
+		}
+	}
+	return
+}
+
+// capRoots applies the 25-node budget with ≥6 slots reserved for established
+// gray context (§5.2.2), prioritizing the structural spine (shells/layouts)
+// when trimming.
+func (g *graph) capRoots(changed, ctx []string, cap int) (map[string]bool, []string) {
+	included := map[string]bool{}
+	const minCtx = 6
+	var spine, sib, tgt, other []string
+	for _, k := range ctx {
+		n := g.nodes[k]
+		switch {
+		case strings.HasPrefix(k, "ctx::shell::") || isRouteLayout(n.file):
+			spine = append(spine, k)
+		case isRoutePage(n.file):
+			sib = append(sib, k)
+		case isImportTargetKey(k, g.imports):
+			tgt = append(tgt, k)
+		default:
+			other = append(other, k)
+		}
+	}
+	gray := append(append(append(spine, sib...), tgt...), other...)
+	if len(changed)+len(ctx) <= cap {
+		for _, k := range changed {
+			included[k] = true
+		}
+		for _, k := range gray {
+			included[k] = true
+		}
+		return included, nil
+	}
+	changedShown := len(changed)
+	if changedShown > cap-minCtx {
+		changedShown = cap - minCtx
+	}
+	if changedShown < 0 {
+		changedShown = 0
+	}
+	grayBudget := cap - changedShown
+	for i, k := range changed {
+		if i < changedShown {
+			included[k] = true
+		}
+	}
+	for i, k := range gray {
+		if i < grayBudget {
+			included[k] = true
+		}
+	}
+	var notes []string
+	if len(changed) > changedShown {
+		notes = append(notes, fmt.Sprintf("graph capped at %d nodes; %d more changed symbols not drawn (see test-impact table).", cap, len(changed)-changedShown))
+	}
+	return included, notes
+}
+
+// chooseView implements §5.1 auto-selection: roots for additive PRs (≥70%
+// additions) that have honest established context to surface; blast otherwise.
+// Explicit --view roots|blast always wins. No graph mutation — reads only.
+func chooseView(req string, g *graph) string {
+	switch req {
+	case "roots", "blast":
+		return req
+	}
+	changed, additions := 0, 0
+	for _, k := range g.order {
+		n := g.nodes[k]
+		if n.isTest || n.change == "" || n.change == classCtx {
+			continue
+		}
+		changed++
+		if n.change == classAdd {
+			additions++
+		}
+	}
+	if changed == 0 || float64(additions)/float64(changed) < 0.70 {
+		return "blast"
+	}
+	if !canSurfaceRootsCtx(g) {
+		return "blast"
+	}
+	return "roots"
+}
+
+func canSurfaceRootsCtx(g *graph) bool {
+	for _, r := range g.routes {
+		if r.ParentLayout != "" {
+			return true
+		}
+	}
+	for _, im := range g.imports {
+		if len(im.Targets) > 0 {
+			return true
+		}
+	}
+	for _, k := range g.order {
+		if n := g.nodes[k]; n.lang == "go" && n.change == classCtx && !n.isTest {
+			return true // backend: existing callers (§5.2.2 backend)
+		}
+	}
+	return false
+}
+
+func isImportTargetKey(key string, imports []importCtx) bool {
+	for _, im := range imports {
+		for _, t := range im.Targets {
+			if "ts::"+t.File == key {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ---------------- root-system path/label helpers ----------------
+
+func isRoutePage(f string) bool {
+	return strings.HasSuffix(f, "+page.svelte") && strings.Contains(f, "/routes/")
+}
+func isRouteLayout(f string) bool {
+	return strings.HasSuffix(f, "+layout.svelte") && strings.Contains(f, "/routes/")
+}
+
+// routePath: frontend/src/routes/orchestration/live/+page.svelte -> /orchestration/live
+func routePath(file string) string {
+	const pfx = "frontend/src/routes/"
+	if !strings.HasPrefix(file, pfx) {
+		return file
+	}
+	rel := strings.TrimPrefix(file, pfx)
+	for _, sfx := range []string{"/+page.svelte", "/+layout.svelte", "+page.svelte", "+layout.svelte"} {
+		rel = strings.TrimSuffix(rel, sfx)
+	}
+	rel = strings.TrimSuffix(rel, "/")
+	if rel == "" {
+		return "/"
+	}
+	return "/" + rel
+}
+
+// shortRouteFile: .../orchestration/live/+page.svelte -> live/+page.svelte
+func shortRouteFile(file string) string {
+	rel := strings.TrimPrefix(file, "frontend/src/routes/")
+	parts := strings.Split(rel, "/")
+	if len(parts) >= 2 {
+		return parts[len(parts)-2] + "/" + parts[len(parts)-1]
+	}
+	return rel
+}
+
+func shellDirOf(layoutFile string) string {
+	return strings.TrimPrefix(fileDir(layoutFile), "frontend/src/")
+}
+
+func fileDir(p string) string {
+	if i := strings.LastIndexByte(p, '/'); i >= 0 {
+		return p[:i]
+	}
+	return p
+}
+
+func lastSegment(p string) string {
+	p = strings.TrimRight(p, "/")
+	if i := strings.LastIndexByte(p, '/'); i >= 0 {
+		return p[i+1:]
+	}
+	return p
+}
+
+func langOf(file string) string {
+	if strings.HasSuffix(file, ".svelte") {
+		return "svelte"
+	}
+	return "ts"
+}
+
+// rootsLabel: path-derived, informative labels for the root-system view.
+func rootsLabel(n *node) string {
+	if strings.HasPrefix(n.key, "ctx::shell::") {
+		return fmt.Sprintf("%s UI shell<br/>%s/", lastSegment(n.file), n.file)
+	}
+	switch {
+	case isRouteLayout(n.file), isRoutePage(n.file):
+		if len(n.exports) > 0 {
+			return fmt.Sprintf("%s<br/>%s · [%s]", shortRouteFile(n.file), routePath(n.file), strings.Join(n.exports, ", "))
+		}
+		return fmt.Sprintf("%s<br/>%s", shortRouteFile(n.file), routePath(n.file))
+	default:
+		rel := strings.TrimPrefix(n.file, "frontend/src/")
+		if len(n.exports) > 0 {
+			return fmt.Sprintf("%s<br/>[%s]", rel, strings.Join(n.exports, ", "))
+		}
+		if n.lang == "go" && n.label != "" {
+			return fmt.Sprintf("%s<br/>%s", n.label, shortFile(n.file))
+		}
+		return rel
+	}
 }
 
 // ---------------- helpers ----------------

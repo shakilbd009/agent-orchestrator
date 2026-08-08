@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -103,5 +104,101 @@ func TestClassifyFuncs(t *testing.T) {
 	got = classifyFuncs(map[string]*funcInfo{"D": {canon: "D"}}, nil, nil)
 	if got["D"] != classRem {
 		t.Fatalf("expected D=rem, got %v", got)
+	}
+}
+
+// root-system view pure logic (prototype §5): view auto-selection (§5.1), route
+// path derivation, and the ≥6-slot ctx reservation in the cap (§5.2.2).
+func TestRoutePath(t *testing.T) {
+	cases := []struct {
+		name, in, want string
+	}{
+		{"page nested", "frontend/src/routes/orchestration/live/+page.svelte", "/orchestration/live"},
+		{"layout", "frontend/src/routes/orchestration/+layout.svelte", "/orchestration"},
+		{"index page", "frontend/src/routes/orchestration/+page.svelte", "/orchestration"},
+		{"root page", "frontend/src/routes/+page.svelte", "/"},
+		{"non-route", "frontend/src/lib/api/client.ts", "frontend/src/lib/api/client.ts"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := routePath(c.in); got != c.want {
+				t.Fatalf("routePath(%q) = %q, want %q", c.in, got, c.want)
+			}
+		})
+	}
+}
+
+func TestChooseViewAuto(t *testing.T) {
+	g := newGraph()
+	// additive: 4 adds + 1 mod = 80% additions, with a route parent layout → roots.
+	addNodes(g, []string{"a1", "a2", "a3", "a4"}, classAdd)
+	addNodes(g, []string{"m1"}, classMod)
+	g.routes = []routeCtx{{File: "x", ParentLayout: "frontend/src/routes/orchestration/+layout.svelte"}}
+	if got := chooseView("auto", g); got != "roots" {
+		t.Fatalf("additive+ctx: chooseView= %q, want roots", got)
+	}
+	// explicit always wins.
+	if got := chooseView("blast", g); got != "blast" {
+		t.Fatalf("explicit blast overridden: %q", got)
+	}
+	if got := chooseView("roots", g); got != "roots" {
+		t.Fatalf("explicit roots overridden: %q", got)
+	}
+	// heavily-modifying: 1 add + 4 mod = 20% → blast even with ctx.
+	g2 := newGraph()
+	addNodes(g2, []string{"a1"}, classAdd)
+	addNodes(g2, []string{"m1", "m2", "m3", "m4"}, classMod)
+	g2.routes = []routeCtx{{File: "x", ParentLayout: "frontend/src/routes/orchestration/+layout.svelte"}}
+	if got := chooseView("auto", g2); got != "blast" {
+		t.Fatalf("modifying: chooseView= %q, want blast", got)
+	}
+	// additive but no honest context to surface → blast (graceful degrade).
+	g3 := newGraph()
+	addNodes(g3, []string{"a1", "a2", "a3"}, classAdd)
+	if got := chooseView("auto", g3); got != "blast" {
+		t.Fatalf("no-ctx: chooseView= %q, want blast", got)
+	}
+}
+
+func TestCapRootsReservesCtx(t *testing.T) {
+	g := newGraph()
+	// 20 changed + 8 ctx (all shells so they are spine) under a 25 cap: changed is
+	// trimmed to 19 but ctx keeps ≥6 slots (here all 8 fit since 19+8>25 → ctx=6).
+	var changed []string
+	for i := 0; i < 20; i++ {
+		k := fmt.Sprintf("ts::c%d", i)
+		g.addNode(&node{key: k, change: classAdd, lang: "ts"})
+		changed = append(changed, k)
+	}
+	var ctx []string
+	for i := 0; i < 8; i++ {
+		k := fmt.Sprintf("ctx::shell::routes/d%d", i)
+		g.addNode(&node{key: k, change: classCtx, file: "routes/d" + fmt.Sprint(i)})
+		ctx = append(ctx, k)
+	}
+	included, _ := g.capRoots(changed, ctx, defaultCap)
+	ctxShown := 0
+	for _, k := range ctx {
+		if included[k] {
+			ctxShown++
+		}
+	}
+	if ctxShown < 6 {
+		t.Fatalf("ctx reserved = %d, want >=6 (§5.2.2)", ctxShown)
+	}
+	total := 0
+	for _, v := range included {
+		if v {
+			total++
+		}
+	}
+	if total > defaultCap {
+		t.Fatalf("total included = %d, want <= cap %d", total, defaultCap)
+	}
+}
+
+func addNodes(g *graph, keys []string, change string) {
+	for _, k := range keys {
+		g.addNode(&node{key: k, change: change, lang: "ts"})
 	}
 }
