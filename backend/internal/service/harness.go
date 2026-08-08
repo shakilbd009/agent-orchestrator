@@ -197,20 +197,26 @@ func ConfigureHarness(maxConcurrent int, taskTimeout time.Duration) {
 	}
 }
 
-// acquireWorkerSlot tries to take a concurrency slot. Returns false if the cap
-// is reached (caller emits agent.blocked instead of spawning).
-func acquireWorkerSlot() bool {
+// acquireWorkerSlot tries to take a concurrency slot. It returns the semaphore
+// channel the slot was acquired on (or nil if the cap is reached). The caller
+// must pass that same channel to releaseWorkerSlot — a release is bound to the
+// channel it was acquired from, so a deferred release from a stale goroutine
+// can never drain a reconfigured semaphore (ConfigureHarness swaps the global).
+func acquireWorkerSlot() chan struct{} {
 	select {
 	case workerSlots <- struct{}{}:
-		return true
+		return workerSlots
 	default:
-		return false
+		return nil
 	}
 }
 
-func releaseWorkerSlot() {
+func releaseWorkerSlot(ch chan struct{}) {
+	if ch == nil {
+		return
+	}
 	select {
-	case <-workerSlots:
+	case <-ch:
 	default:
 	}
 }
@@ -239,9 +245,10 @@ func (s *TaskService) superviseWorker(
 	ctx context.Context,
 	projectID, taskID, agentName, layer string,
 	events <-chan WorkerEvent,
+	slots chan struct{},
 ) {
 	defer releaseWorker(taskID)
-	defer releaseWorkerSlot()
+	defer releaseWorkerSlot(slots)
 
 	terminal := false
 	for ev := range events {

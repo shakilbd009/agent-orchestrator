@@ -431,7 +431,7 @@ func TestSuperviseWorker_CompletionDrivesCompleteTask(t *testing.T) {
 	ch <- WorkerEvent{Kind: WorkerCompleted, Summary: "shipped it", Artifacts: []string{"main.go"}}
 	close(ch)
 
-	svc.superviseWorker(context.Background(), "p1", "t1", "dev1", "B", ch)
+	svc.superviseWorker(context.Background(), "p1", "t1", "dev1", "B", ch, nil)
 
 	if !completed {
 		t.Error("expected CompleteTask to set status=done")
@@ -452,7 +452,7 @@ func TestSuperviseWorker_BlockedEmitsBlockedAndBlocksTask(t *testing.T) {
 	ch <- WorkerEvent{Kind: WorkerBlocked, Message: "tests failed"}
 	close(ch)
 
-	svc.superviseWorker(context.Background(), "p1", "t1", "dev1", "B", ch)
+	svc.superviseWorker(context.Background(), "p1", "t1", "dev1", "B", ch, nil)
 
 	if !strings.Contains(blockedReason, "tests failed") {
 		t.Errorf("blockReason=%q", blockedReason)
@@ -467,7 +467,7 @@ func TestSuperviseWorker_IdleEmitsIdle(t *testing.T) {
 	ch := make(chan WorkerEvent, 1)
 	ch <- WorkerEvent{Kind: WorkerIdle}
 	close(ch)
-	svc.superviseWorker(context.Background(), "p1", "t1", "dev1", "B", ch)
+	svc.superviseWorker(context.Background(), "p1", "t1", "dev1", "B", ch, nil)
 	if !evt.hasTopic("agent.idle") {
 		t.Errorf("expected agent.idle; saw %v", evt.topics())
 	}
@@ -762,10 +762,11 @@ func TestActivateTask_ConcurrencyLimitBlocks(t *testing.T) {
 	setFlag(t, func() { middleware.FeatureFlags.AgentHarness = true })
 
 	// Exhaust the single slot so ActivateTask cannot acquire one.
-	if !acquireWorkerSlot() {
+	slot := acquireWorkerSlot()
+	if slot == nil {
 		t.Fatal("precondition: could not acquire the slot")
 	}
-	t.Cleanup(releaseWorkerSlot)
+	t.Cleanup(func() { releaseWorkerSlot(slot) })
 
 	svc, taskRepo, evt := newTaskSvcWithCapture()
 	spawned := 0
@@ -830,7 +831,7 @@ func TestSuperviseWorker_ChannelClosedWithoutTerminalBlocks(t *testing.T) {
 	ch := make(chan WorkerEvent)
 	close(ch) // no terminal event
 
-	svc.superviseWorker(context.Background(), "p1", "t1", "dev1", "B", ch)
+	svc.superviseWorker(context.Background(), "p1", "t1", "dev1", "B", ch, nil)
 
 	if !blocked {
 		t.Error("expected BlockTask for an orphaned stream")

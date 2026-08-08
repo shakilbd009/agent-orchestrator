@@ -415,7 +415,8 @@ func (s *TaskService) ActivateTask(ctx context.Context, projectID, taskID string
 
 	// M1: bound concurrent workers. If the cap is reached, surface as blocked
 	// instead of spawning another process.
-	if !acquireWorkerSlot() {
+	slots := acquireWorkerSlot()
+	if slots == nil {
 		releaseWorker(taskID)
 		reason := "worker concurrency limit reached"
 		s.emitAgentEvent(ctx, "agent.blocked", &taskID, projectID, agentName, layer, map[string]any{
@@ -447,7 +448,7 @@ func (s *TaskService) ActivateTask(ctx context.Context, projectID, taskID string
 	if err != nil {
 		cancel()
 		releaseWorker(taskID)
-		releaseWorkerSlot()
+		releaseWorkerSlot(slots)
 		reason := "worker spawn failed: " + err.Error()
 		s.emitAgentEvent(ctx, "agent.blocked", &taskID, projectID, agentName, layer, map[string]any{
 			"agentName": agentName, "layer": layer, "taskId": taskID, "reason": reason,
@@ -457,7 +458,7 @@ func (s *TaskService) ActivateTask(ctx context.Context, projectID, taskID string
 	}
 	go func() {
 		defer cancel()
-		s.superviseWorker(wctx, projectID, taskID, agentName, layer, events)
+		s.superviseWorker(wctx, projectID, taskID, agentName, layer, events, slots)
 	}()
 
 	return task, nil
