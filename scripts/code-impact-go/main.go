@@ -1024,6 +1024,12 @@ func chooseView(req string, g *graph) string {
 	return "roots"
 }
 
+// canSurfaceRootsCtx reports whether surfaceRootsContext can honestly add gray
+// established context. Gated to FRONTEND only (PR #14 review M1 / decision A):
+// surfaceRootsContext has no backend context path, so auto-roots on an additive
+// backend PR would drop blast's richer/honest callee + overflow signal for a
+// misleadingly information-poorer view. Additive backend PRs auto-select blast;
+// --view roots stays manually available for backend if ever wanted.
 func canSurfaceRootsCtx(g *graph) bool {
 	for _, r := range g.routes {
 		if r.ParentLayout != "" {
@@ -1033,11 +1039,6 @@ func canSurfaceRootsCtx(g *graph) bool {
 	for _, im := range g.imports {
 		if len(im.Targets) > 0 {
 			return true
-		}
-	}
-	for _, k := range g.order {
-		if n := g.nodes[k]; n.lang == "go" && n.change == classCtx && !n.isTest {
-			return true // backend: existing callers (§5.2.2 backend)
 		}
 	}
 	return false
