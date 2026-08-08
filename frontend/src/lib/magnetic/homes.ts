@@ -83,3 +83,17 @@ export function cardHome(
     y: agentHome.y + CARD_OFFSET_Y + stack,
   };
 }
+
+// Mean position of a cluster's active agents' homes = that task's focal center
+// (scout report §4.2: each active task gets its OWN centroid, so concurrent
+// tasks form separate temporary clusters). Pure so the per-task centroid split
+// is unit-testable without driving the physics loop. Returns null for an empty
+// / all-unknown cluster (engine then falls back to the global centroid).
+export function clusterCentroid(
+  cluster: { agents: string[] },
+  homes: Record<string, Pt>
+): Pt | null {
+  let x = 0, y = 0, n = 0;
+  for (const a of cluster.agents) { const h = homes[a]; if (h) { x += h.x; y += h.y; n++; } }
+  return n ? { x: x / n, y: y / n } : null;
+}

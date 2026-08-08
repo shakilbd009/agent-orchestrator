@@ -64,6 +64,51 @@ describe('magnetic event-feed reducer', () => {
     r.reduce(env('task.status.changed', { fromStatus: 'in_progress', toStatus: 'done' }, 't_qa'));
     expect(r.snapshot().active).toEqual([]);
   });
+
+  // Phase E — multi-cluster (scout report §4.2): concurrent active tasks each
+  // get their OWN cluster, instead of one merged centroid.
+  it('two concurrently-active tasks form two separate clusters; completing one releases its cluster', () => {
+    const r = createReducer({ agents: AGENTS, edges: EDGES });
+    r.reduce(env('agent.activated', { agentName: 'developer', layer: 'B', taskId: 'tA' }, 'tA'));
+    r.reduce(env('agent.activated', { agentName: 'qa', layer: 'B', taskId: 'tB' }, 'tB'));
+    let s = r.snapshot();
+    expect(new Set(s.active)).toEqual(new Set(['developer', 'qa']));
+    expect(s.clusters).toHaveLength(2);
+    expect(s.clusters.map((c) => c.taskId).sort()).toEqual(['tA', 'tB']);
+    expect(s.clusters.find((c) => c.taskId === 'tA')!.agents).toEqual(['developer']);
+    expect(s.clusters.find((c) => c.taskId === 'tB')!.agents).toEqual(['qa']);
+
+    // task A completes → its cluster drops; B keeps working
+    r.reduce(env('task.status.changed', { fromStatus: 'in_progress', toStatus: 'done' }, 'tA'));
+    s = r.snapshot();
+    expect(s.clusters).toHaveLength(1);
+    expect(s.clusters[0].taskId).toBe('tB');
+    expect(s.active).toEqual(['qa']);
+  });
+
+  it('an agent active on two tasks appears in both clusters (multi-membership)', () => {
+    // developer works tA and tB concurrently → member of both clusters, so the
+    // engine pulls it toward each task's centroid (scout §4.2 generalization).
+    const r = createReducer({ agents: AGENTS, edges: EDGES });
+    r.reduce(env('agent.activated', { agentName: 'developer', layer: 'B', taskId: 'tA' }, 'tA'));
+    r.reduce(env('agent.activated', { agentName: 'qa', layer: 'B', taskId: 'tB' }, 'tB'));
+    r.reduce(env('agent.activated', { agentName: 'developer', layer: 'B', taskId: 'tB' }, 'tB'));
+    const s = r.snapshot();
+    expect(s.clusters).toHaveLength(2);
+    expect(s.clusters.find((c) => c.taskId === 'tA')!.agents).toEqual(['developer']);
+    expect(s.clusters.find((c) => c.taskId === 'tB')!.agents).toContain('developer');
+    expect(s.clusters.find((c) => c.taskId === 'tB')!.agents).toContain('qa');
+  });
+
+  it('gate.rejected / gate.approved fold into an observed gate view per task', () => {
+    const r = createReducer({ agents: AGENTS, edges: EDGES });
+    r.reduce(env('gate.rejected', { rejectedBy: 'reviewer', gateType: 'code_review', gateLevel: 'task' }, 'tA'));
+    let s = r.snapshot();
+    expect(s.gates).toContainEqual({ taskId: 'tA', gateType: 'code_review', state: 'blocked' });
+    r.reduce(env('gate.approved', { approvedBy: 'reviewer', approverRole: 'layer_b', gateType: 'code_review', gateLevel: 'task' }, 'tA'));
+    s = r.snapshot();
+    expect(s.gates.find((g) => g.taskId === 'tA')?.state).toBe('passed');
+  });
 });
 
 describe('startMockFeed handle (PR #13 M1 — no orphan timers after close)', () => {

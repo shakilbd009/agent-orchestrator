@@ -75,10 +75,10 @@
     return () => clearInterval(interval);
   });
 
-  const navItems = [
+  const navItems: { href: string; label: string; primary?: boolean }[] = [
+    { href: '/orchestration/live', label: 'Live', primary: true },
     { href: '/orchestration', label: 'Projects' },
     { href: '/orchestration/board', label: 'Board' },
-    { href: '/orchestration/live', label: 'Live' },
     { href: '/orchestration/decomposition', label: 'Decomposition' },
     { href: '/orchestration/gates', label: 'Gates' },
     { href: '/orchestration/webhooks', label: 'Webhooks' },
@@ -119,6 +119,7 @@
           <a
             href="{item.href}{currentProjectId ? `?project=${currentProjectId}` : ''}"
             class="orch-nav-item"
+            class:primary={item.primary}
             class:active={page.url.pathname === item.href || (item.href !== '/orchestration' && page.url.pathname.startsWith(item.href))}
           >
             {item.label}
@@ -241,6 +242,16 @@
     background: #2a2a2a;
     color: #fff;
     font-weight: 500;
+  }
+
+  /* Live is the primary surface (scout §5); Board is a secondary tab. */
+  .orch-nav-item.primary {
+    color: #7dd3fc;
+    font-weight: 600;
+  }
+  .orch-nav-item.primary.active {
+    background: #11304a;
+    color: #7dd3fc;
   }
 
   .orch-status {

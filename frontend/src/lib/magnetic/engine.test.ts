@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { initLivingGraph } from './engine';
 import { createReducer } from './event-feed';
+import { clusterCentroid } from './homes';
 import { AGENTS, EDGES } from './topology';
 import type { EventEnvelope } from '$lib/api/orchestration';
 import type { EngineHandle as EngineH, CardSpec } from './engine';
@@ -72,5 +73,54 @@ describe('magnetic engine + feed integration (jsdom)', () => {
       engine.destroy();
       root.remove();
     }
+  });
+
+  // Phase E — node/cluster click opens the gate drawer (scout §5: repurpose
+  // hover/focus renderDetail to a CLICK that resolves the agent's active task
+  // from the current beat's clusters).
+  it('clicking a node fires onSelect with the agent and its active task; canvas click clears', () => {
+    const root = scaffold();
+    document.body.appendChild(root);
+    let sel: { agentId: string; taskId: string | null } | null | undefined;
+    const engine = initLivingGraph(root, { onSelect: (s) => { sel = s; } });
+    const reducer = createReducer({ agents: AGENTS, edges: EDGES });
+    try {
+      drive(reducer, engine, env('agent.activated', { agentName: 'developer', layer: 'B', taskId: 't1' }, 't1'));
+      const devNode = root.querySelector('[data-node="developer"]')!;
+      devNode.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      expect(sel).toEqual({ agentId: 'developer', taskId: 't1' });   // resolved from cluster t1
+      expect(devNode.classList.contains('sel')).toBe(true);
+
+      // an idle agent (no active cluster) → taskId null
+      root.querySelector('[data-node="pm"]')!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      expect(sel).toEqual({ agentId: 'pm', taskId: null });
+
+      // clicking the empty canvas clears the selection
+      const svg = root.querySelector('svg.map')!;
+      svg.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      expect(sel).toBeNull();
+    } finally {
+      engine.destroy();
+      root.remove();
+    }
+  });
+});
+
+describe('clusterCentroid (Phase E per-task centroids, scout §4.2)', () => {
+  it('two concurrent tasks get two distinct centroids at their own agents\' home means', () => {
+    const homes: Record<string, { x: number; y: number }> = {
+      developer: { x: 100, y: 100 }, reviewer: { x: 120, y: 140 },
+      qa: { x: 900, y: 800 }, devops: { x: 920, y: 760 },
+    };
+    const cA = clusterCentroid({ agents: ['developer', 'reviewer'] }, homes)!;
+    const cB = clusterCentroid({ agents: ['qa', 'devops'] }, homes)!;
+    // cluster A centered near (110,120); cluster B centered near (910,780)
+    expect(cA.x).toBeCloseTo(110); expect(cA.y).toBeCloseTo(120);
+    expect(cB.x).toBeCloseTo(910); expect(cB.y).toBeCloseTo(780);
+    // the two clusters are clearly separated (no merged centroid)
+    expect(Math.hypot(cA.x - cB.x, cA.y - cB.y)).toBeGreaterThan(800);
+    // an empty / all-unknown cluster yields no centroid (engine falls back)
+    expect(clusterCentroid({ agents: [] }, homes)).toBeNull();
+    expect(clusterCentroid({ agents: ['ghost'] }, homes)).toBeNull();
   });
 });
