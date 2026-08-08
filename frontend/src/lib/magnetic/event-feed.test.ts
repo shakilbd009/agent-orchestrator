@@ -100,6 +100,23 @@ describe('magnetic event-feed reducer', () => {
     expect(s.clusters.find((c) => c.taskId === 'tB')!.agents).toContain('qa');
   });
 
+  it('handoff.submitted releases the submitter from its task only — multi-membership kept on the other task (review F3)', () => {
+    const r = createReducer({ agents: AGENTS, edges: EDGES });
+    r.reduce(env('agent.activated', { agentName: 'developer', layer: 'B', taskId: 'tA' }, 'tA'));
+    r.reduce(env('agent.activated', { agentName: 'developer', layer: 'B', taskId: 'tB' }, 'tB'));
+    r.reduce(env('agent.activated', { agentName: 'qa', layer: 'B', taskId: 'tB' }, 'tB'));
+    // developer hands off on tA → dropped from tA ONLY; still active on tB
+    r.reduce(env('handoff.submitted', { taskId: 'tA', submittedBy: 'developer', summary: 'done', artifacts: ['a.patch'], validationPerformed: 'unit' }, 'tA'));
+    const s = r.snapshot();
+    expect(s.clusters.find((c) => c.taskId === 'tA')).toBeUndefined();      // tA cluster gone
+    const tB = s.clusters.find((c) => c.taskId === 'tB')!;
+    expect(tB.agents).toEqual(expect.arrayContaining(['developer', 'qa']));  // developer still on tB
+    // agent.idle, by contrast, is global — releases from every task
+    r.reduce(env('agent.idle', { agentName: 'developer', layer: 'B' }, null));
+    const s2 = r.snapshot();
+    expect(s2.clusters.find((c) => c.taskId === 'tB')!.agents).toEqual(['qa']);
+  });
+
   it('gate.rejected / gate.approved fold into an observed gate view per task', () => {
     const r = createReducer({ agents: AGENTS, edges: EDGES });
     r.reduce(env('gate.rejected', { rejectedBy: 'reviewer', gateType: 'code_review', gateLevel: 'task' }, 'tA'));

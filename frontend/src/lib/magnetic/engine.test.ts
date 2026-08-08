@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { initLivingGraph } from './engine';
 import { createReducer } from './event-feed';
-import { clusterCentroid } from './homes';
+import { clusterCentroid, separateCentroids, restNodes } from './homes';
 import { AGENTS, EDGES } from './topology';
 import type { EventEnvelope } from '$lib/api/orchestration';
 import type { EngineHandle as EngineH, CardSpec } from './engine';
@@ -122,5 +122,46 @@ describe('clusterCentroid (Phase E per-task centroids, scout §4.2)', () => {
     // an empty / all-unknown cluster yields no centroid (engine falls back)
     expect(clusterCentroid({ agents: [] }, homes)).toBeNull();
     expect(clusterCentroid({ agents: ['ghost'] }, homes)).toBeNull();
+  });
+});
+
+describe('separateCentroids — review M1 (2×2 Layer-B diagonal collapse)', () => {
+  // The REAL restNodes(AGENTS) layout: Layer B sits in a 2×2 grid, so the
+  // complementary diagonal splits share the rectangle's center → raw centroids
+  // coincide (separation 0) → one merged cluster. This is the exact hole the
+  // synthetic-homes test above masks. Prove it, then prove separateCentroids
+  // fixes it against the real layout.
+  const realHomes = restNodes(AGENTS);
+
+  it('raw centroids coincide for the {developer,reviewer} vs {qa,devops} diagonal', () => {
+    const a = clusterCentroid({ agents: ['developer', 'reviewer'] }, realHomes)!;
+    const b = clusterCentroid({ agents: ['qa', 'devops'] }, realHomes)!;
+    expect(Math.hypot(a.x - b.x, a.y - b.y)).toBeLessThanOrEqual(1);   // documents the gap
+  });
+
+  it('separateCentroids splits the diagonal into two distinct focal points', () => {
+    const raw: Record<string, { x: number; y: number }> = {
+      tA: clusterCentroid({ agents: ['developer', 'reviewer'] }, realHomes)!,
+      tB: clusterCentroid({ agents: ['qa', 'devops'] }, realHomes)!,
+    };
+    const sep = separateCentroids(raw);
+    const d = Math.hypot(sep.tA.x - sep.tB.x, sep.tA.y - sep.tB.y);
+    expect(d).toBeGreaterThan(40);   // clearly separated, not one merged point
+    // non-coincident clusters are left untouched
+    const raw2: Record<string, { x: number; y: number }> = {
+      tA: clusterCentroid({ agents: ['developer', 'qa'] }, realHomes)!,       // top row
+      tB: clusterCentroid({ agents: ['reviewer', 'devops'] }, realHomes)!,    // bottom row
+    };
+    const sep2 = separateCentroids(raw2);
+    expect(sep2.tA).toEqual(raw2.tA);
+    expect(sep2.tB).toEqual(raw2.tB);
+  });
+
+  it('separateCentroids is deterministic — same ids, same offsets every call', () => {
+    const raw: Record<string, { x: number; y: number }> = {
+      tA: clusterCentroid({ agents: ['developer', 'reviewer'] }, realHomes)!,
+      tB: clusterCentroid({ agents: ['qa', 'devops'] }, realHomes)!,
+    };
+    expect(separateCentroids(raw)).toEqual(separateCentroids(raw));
   });
 });

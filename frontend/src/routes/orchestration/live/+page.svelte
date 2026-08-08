@@ -9,7 +9,7 @@
   import type { FeedHandle, ReducerSnapshot } from '$lib/magnetic/event-feed';
   import {
     listProjectPhaseGates,
-    listProjectTasks,
+    getProjectTask,
     updateProjectPhaseGate,
     updateTaskGate,
   } from '$lib/api/client';
@@ -114,10 +114,17 @@
     gateLoading = true; gateError = null;
     (async () => {
       try {
-        const [pg, taskRes] = await Promise.all([listProjectPhaseGates(pid), listProjectTasks(pid)]);
+        // phase gates are project-global; the selected task's gates come from
+        // getProjectTask (one task), and only when a task is actually selected
+        // (review N6 — don't fetch the whole task list on an idle-agent click).
+        const pg = await listProjectPhaseGates(pid);
+        let task: OrchestrationTask | null = null;
+        if (sel.taskId) {
+          try { task = await getProjectTask(pid, sel.taskId); } catch { task = null; }
+        }
         if (cancelled) return;
         phaseGates = pg.gates;
-        selTask = sel.taskId ? taskRes.tasks.find((t) => t.id === sel.taskId) ?? null : null;
+        selTask = task;
       } catch (e) {
         if (!cancelled) gateError = e instanceof Error ? e.message : String(e);
       } finally {
@@ -180,9 +187,10 @@
         <button class:on={mode === 'live'} disabled={!liveSupported}
           title={liveSupported ? 'Drive from live SSE' : 'select a project (?project=)'} onclick={() => switchMode('live')}>Live</button>
       </div>
-      {#if viewMode === 'live'}
-        <button class="play" data-action="play">Pause</button>
-      {/if}
+      <!-- always in the DOM: the engine binds the handler once at init, so
+           re-creating the node on a Map↔Motion toggle (review M2) would lose it.
+           Hide via CSS in static mode instead of {#if}. -->
+      <button class="play" data-action="play" class:hide={viewMode === 'static'}>Pause</button>
     </div>
   </header>
 
@@ -350,6 +358,7 @@
   .seg button.on { background: #2a4a2a; color: #fff; }
   .seg button:disabled { opacity: 0.4; cursor: not-allowed; }
   .play { background: #1a1a1a; color: #ddd; border: 1px solid #333; border-radius: 6px; padding: 0.3rem 0.8rem; cursor: pointer; font-size: 0.78rem; }
+  .play.hide { display: none; }
 
   .banner { background: #1a2a1a; border: 1px solid #2a4a2a; color: #bfe; padding: 0.5rem 0.8rem; border-radius: 6px; font-size: 0.8rem; margin: 0 0 0.75rem; }
   .banner.warn { background: #2a1a1a; border-color: #4a2a2a; color: #fcc; }

@@ -23,7 +23,7 @@
 
 import { AGENTS, EDGES } from './topology';
 import type { Agent, Beat, Hue } from './topology';
-import { cardHome, clusterCentroid } from './homes';
+import { cardHome, clusterCentroid, separateCentroids } from './homes';
 import type { Pt } from './homes';
 
 // physics constants (single tunable block) — verbatim from living-graph.ts
@@ -36,6 +36,12 @@ const BREATH_AMP = 3.6, BREATH_SPD = 0.0021;
 const BOUND_PAD = 70;
 const CW = 156, CH = 64;
 const SVGNS = 'http://www.w3.org/2000/svg';
+
+// Escape backend-fed text before interpolating into innerHTML (review F4:
+// `id`/`role`/`sub` can originate from the SSE `agentName`). Defense-in-depth.
+function esc(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : c === '"' ? '&quot;' : '&#39;');
+}
 
 export interface CardSpec {
   id: string;
@@ -140,14 +146,18 @@ export function initLivingGraph(root: HTMLElement, opts: EngineOptions = {}): En
     // center, so concurrent tasks form SEPARATE temporary clusters instead of
     // one merged blob. An agent active in N tasks is pulled toward each task's
     // centroid (sum of forces). Agents in the union but no named cluster fall
-    // back to the global centroid.
+    // back to the global centroid. `separateCentroids` (review M1) breaks exact
+    // coincidences (e.g. the 2×2 Layer-B diagonal) so complementary splits
+    // don't collapse to one focal point.
     const clusters = beat.clusters || [];
-    const taskCen: Record<string, Pt> = {};
-    const agentTasks: Record<string, string[]> = {};
+    const taskCenRaw: Record<string, Pt> = {};
     for (const c of clusters) {
       const cen = clusterCentroid(c, rest);
-      if (cen) { taskCen[c.taskId] = cen; for (const a of c.agents) (agentTasks[a] ||= []).push(c.taskId); }
+      if (cen) taskCenRaw[c.taskId] = cen;
     }
+    const taskCen = separateCentroids(taskCenRaw);
+    const agentTasks: Record<string, string[]> = {};
+    for (const c of clusters) for (const a of c.agents) if (taskCen[c.taskId]) (agentTasks[a] ||= []).push(c.taskId);
     const cen = centroid(beat.active || []);
     const breath = Math.sin(now * BREATH_SPD) * BREATH_AMP;
     const ids = Object.keys(nodes);
@@ -254,8 +264,8 @@ export function initLivingGraph(root: HTMLElement, opts: EngineOptions = {}): En
       const state = (currentBeat.win === 'open' && id === 'captain') ? 'open'
         : (currentBeat.active || []).includes(id) ? 'active' : 'idle';
       const roleVar = getComputedStyle(node!).getPropertyValue('--role') || `var(${HUE_VAR[AGENTS[id]?.hue || 'user']})`;
-      return `<div class="who" style="--role:${roleVar}"><span class="name">${role}</span><span class="role-sub">${sub}</span></div>
-        <div class="body"><span class="obj">${instr}</span><div class="chips">${tools.map((t) => `<span class="chip">${t}</span>`).join('')}<span class="chip state">${state}</span></div></div>`;
+      return `<div class="who" style="--role:${esc(roleVar)}"><span class="name">${esc(role)}</span><span class="role-sub">${esc(sub)}</span></div>
+        <div class="body"><span class="obj">${esc(instr)}</span><div class="chips">${tools.map((t) => `<span class="chip">${esc(t)}</span>`).join('')}<span class="chip state">${esc(state)}</span></div></div>`;
     }).join('');
   }
 
@@ -288,7 +298,7 @@ export function initLivingGraph(root: HTMLElement, opts: EngineOptions = {}): En
   function renderCaption(b: Beat) {
     if (capEl) {
       const n = (b.active || []).length;
-      const names = (b.active || []).slice(0, 4).map((id) => AGENTS[id]?.role || id).join(' · ');
+      const names = (b.active || []).slice(0, 4).map((id) => esc(AGENTS[id]?.role || id)).join(' · ');
       const kicker = n === 0 ? 'Settled' : n === 1 ? 'One active' : `${n} active`;
       const body = n === 0
         ? 'No active work; agents rest at home. Cards persist as a knowledge map.'

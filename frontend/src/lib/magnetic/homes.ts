@@ -97,3 +97,42 @@ export function clusterCentroid(
   for (const a of cluster.agents) { const h = homes[a]; if (h) { x += h.x; y += h.y; n++; } }
   return n ? { x: x / n, y: y / n } : null;
 }
+
+// Deterministic 0..2π angle seeded from a string (task id). Never random — the
+// graph must stay stable per project (same tasks → same offsets every frame).
+function hashAngle(s: string): number {
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return ((h >>> 0) % 3600) / 3600 * Math.PI * 2;
+}
+
+// Breaks exact / near centroid coincidences so concurrent clusters with
+// complementary agent splits don't collapse to one focal point (review M1:
+// the 2×2 Layer-B layout makes {developer,reviewer} and {qa,devops} share the
+// rectangle's center → separation 0 → one merged cluster). Each coinciding task
+// is nudged by `radius` at a deterministic angle (hash of its id + even index
+// spacing within the coincidence group), so two tasks always end up apart.
+// Tasks that don't coincide with any other are returned unchanged.
+export function separateCentroids(
+  centroids: Record<string, Pt>,
+  epsilon = 6,
+  radius = 75
+): Record<string, Pt> {
+  const ids = Object.keys(centroids);
+  if (ids.length < 2) return centroids;
+  const out: Record<string, Pt> = {};
+  const visited = new Set<string>();
+  for (const id of ids) {
+    const base = centroids[id];
+    if (visited.has(id)) { out[id] = base; continue; }
+    // coincidence group: every task within epsilon of this one
+    const group = ids.filter((o) => Math.hypot(base.x - centroids[o].x, base.y - centroids[o].y) <= epsilon);
+    group.forEach((g) => visited.add(g));
+    if (group.length <= 1) { out[id] = base; continue; }
+    group.forEach((taskId, i) => {
+      const a = hashAngle(taskId) + (i / group.length) * Math.PI * 2;
+      out[taskId] = { x: base.x + Math.cos(a) * radius, y: base.y + Math.sin(a) * radius };
+    });
+  }
+  return out;
+}

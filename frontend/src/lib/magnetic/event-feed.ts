@@ -81,6 +81,17 @@ export function createReducer(roster: ReducerRoster = { agents: DEFAULT_AGENTS, 
     // drop empty task sets so done tasks release cleanly
     for (const [t, s] of activeByTask) if (s.size === 0 && t !== '_') activeByTask.delete(t);
   }
+  // Task-scoped release (review F3): for handoff.submitted, drop the submitter
+  // from env.taskId's set ONLY — an agent concurrently on two tasks should stay
+  // a member of the other task's cluster. (agent.idle stays global: an idle
+  // agent is idle, period.)
+  function removeFromTask(taskId: string | null, agent: string) {
+    const t = taskId || '_';
+    const s = activeByTask.get(t);
+    if (!s) return;
+    s.delete(agent);
+    if (s.size === 0 && t !== '_') activeByTask.delete(t);
+  }
   function clearTask(taskId: string | null) {
     if (taskId) activeByTask.delete(taskId);
   }
@@ -106,7 +117,7 @@ export function createReducer(roster: ReducerRoster = { agents: DEFAULT_AGENTS, 
       }
       case 'handoff.submitted': {
         const agent = String(p.submittedBy ?? '');
-        if (agent) removeAgent(agent);
+        if (agent) removeFromTask(env.taskId, agent);   // task-scoped (review F3)
         const artifacts = Array.isArray(p.artifacts) ? (p.artifacts as string[]) : [];
         artifacts.forEach((a, i) => {
           const id = mounted.has(a) ? `${a}#${i}` : a;
