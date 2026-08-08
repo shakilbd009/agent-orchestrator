@@ -6,10 +6,11 @@
 # fence to stdout.
 #
 # Usage:
-#   scripts/code-impact                       # BASE_REF=origin/main HEAD_REF=HEAD
+#   scripts/code-impact                              # BASE_REF=origin/main HEAD_REF=HEAD; --view auto
 #   BASE_REF=<ref> HEAD_REF=<ref> scripts/code-impact
 #   scripts/code-impact --base <ref> --head <ref>
-#   scripts/code-impact > body-block.md       # worker-embeddable (gh pr create --body-file)
+#   scripts/code-impact --view roots|blast|auto       # roots = root-system (default for additive PRs)
+#   scripts/code-impact > body-block.md               # worker-embeddable (gh pr create --body-file)
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
