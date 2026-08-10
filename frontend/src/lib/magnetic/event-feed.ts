@@ -26,27 +26,48 @@ import { createSSEConnection } from '$lib/api/client';
 import type { SSEEventHandler } from '$lib/api/client';
 import type { EventEnvelope } from '$lib/api/orchestration';
 import { AGENTS as DEFAULT_AGENTS, EDGES as DEFAULT_EDGES } from './topology';
-import type { Agent, Edge, Hue } from './topology';
+import type { Agent, Edge, Hue, Cluster } from './topology';
+import type { GateState } from '$lib/api/orchestration';
 import type { EngineHandle, CardSpec } from './engine';
 
 export interface ReducerRoster { agents: Record<string, Agent>; edges: Record<string, Edge>; }
 
 export interface BeatDelta {
   active: string[];
+  clusters: Cluster[];       // per-task groupings → engine computes a centroid per task
   lit: string[];
   rework: string[];
   add: string[];            // card ids materialized since last snapshot
 }
 
+// Observed gate state folded from the live `gate.approved`/`gate.rejected`
+// stream. UI-only (the engine ignores it); the click→gate drawer renders this
+// when no backend REST is reachable (faithful mock), and live REST gates
+// otherwise. Keyed last-writer-wins per (taskId, gateType).
+export interface GateView {
+  taskId: string | null;
+  gateType: string;
+  state: GateState;
+}
+
+// Full reducer snapshot: the engine beat plus the UI-only gate view. The feed
+// hands the BeatDelta subset to engine.pushBeat and the whole snapshot to the
+// page drawer via onSnapshot.
+export interface ReducerSnapshot extends BeatDelta {
+  gates: GateView[];
+}
+
 export interface FeedReducer {
   reduce(env: EventEnvelope): CardSpec[];   // fold one event; returns new cards to mount
-  snapshot(): BeatDelta;                     // derive active/lit/rework/add; drains pending cards
+  snapshot(): ReducerSnapshot;               // derive active/clusters/lit/rework/add/gates
 }
 
 export function createReducer(roster: ReducerRoster = { agents: DEFAULT_AGENTS, edges: DEFAULT_EDGES }): FeedReducer {
   const activeByTask = new Map<string, Set<string>>();
   const tension = new Set<string>();        // reviewers that recently rejected/blocked
   const mounted = new Set<string>();        // card ids already materialized
+  // observed gate state per (taskId|gateType) — last-writer-wins from the stream
+  const gateState = new Map<string, GateView>();
   let pendingCards: CardSpec[] = [];
 
   function addActive(taskId: string | null, agent: string) {
@@ -59,6 +80,17 @@ export function createReducer(roster: ReducerRoster = { agents: DEFAULT_AGENTS, 
     for (const s of activeByTask.values()) s.delete(agent);
     // drop empty task sets so done tasks release cleanly
     for (const [t, s] of activeByTask) if (s.size === 0 && t !== '_') activeByTask.delete(t);
+  }
+  // Task-scoped release (review F3): for handoff.submitted, drop the submitter
+  // from env.taskId's set ONLY — an agent concurrently on two tasks should stay
+  // a member of the other task's cluster. (agent.idle stays global: an idle
+  // agent is idle, period.)
+  function removeFromTask(taskId: string | null, agent: string) {
+    const t = taskId || '_';
+    const s = activeByTask.get(t);
+    if (!s) return;
+    s.delete(agent);
+    if (s.size === 0 && t !== '_') activeByTask.delete(t);
   }
   function clearTask(taskId: string | null) {
     if (taskId) activeByTask.delete(taskId);
@@ -85,7 +117,7 @@ export function createReducer(roster: ReducerRoster = { agents: DEFAULT_AGENTS, 
       }
       case 'handoff.submitted': {
         const agent = String(p.submittedBy ?? '');
-        if (agent) removeAgent(agent);
+        if (agent) removeFromTask(env.taskId, agent);   // task-scoped (review F3)
         const artifacts = Array.isArray(p.artifacts) ? (p.artifacts as string[]) : [];
         artifacts.forEach((a, i) => {
           const id = mounted.has(a) ? `${a}#${i}` : a;
@@ -105,11 +137,15 @@ export function createReducer(roster: ReducerRoster = { agents: DEFAULT_AGENTS, 
       case 'gate.rejected': {
         const by = String(p.rejectedBy ?? '');
         if (by) tension.add(by);
+        const gt = String(p.gateType ?? 'review');
+        gateState.set(gateKey(env.taskId, gt), { taskId: env.taskId, gateType: gt, state: 'blocked' });
         break;
       }
       case 'gate.approved': {
         const by = String(p.approvedBy ?? '');
         if (by) tension.delete(by);
+        const gt = String(p.gateType ?? 'review');
+        gateState.set(gateKey(env.taskId, gt), { taskId: env.taskId, gateType: gt, state: 'passed' });
         break;
       }
       // task.decomposition.approved: children activate via their own agent.activated.
@@ -118,9 +154,17 @@ export function createReducer(roster: ReducerRoster = { agents: DEFAULT_AGENTS, 
     return newCards;
   }
 
-  function snapshot(): BeatDelta {
+  function snapshot(): ReducerSnapshot {
     const active = new Set<string>();
     for (const s of activeByTask.values()) for (const a of s) active.add(a);
+
+    // Per-task clusters (scout §4.2): only named tasks form clusters; the null
+    // ('_') bucket's agents stay in the union (so their edges still light) but
+    // use the engine's global-centroid fallback.
+    const clusters: Cluster[] = [];
+    for (const [taskId, s] of activeByTask) {
+      if (taskId !== '_' && s.size) clusters.push({ taskId, agents: [...s] });
+    }
 
     const lit: string[] = [];
     const rework: string[] = [];
@@ -132,17 +176,22 @@ export function createReducer(roster: ReducerRoster = { agents: DEFAULT_AGENTS, 
     }
     const add = pendingCards.map((c) => c.id);
     pendingCards = [];
-    return { active: [...active], lit, rework, add };
+    return { active: [...active], clusters, lit, rework, add, gates: [...gateState.values()] };
   }
 
   return { reduce, snapshot };
+}
+
+function gateKey(taskId: string | null, gateType: string): string {
+  return `${taskId ?? '_'}::${gateType}`;
 }
 
 // Drain the reducer into the engine on a rAF tick (debounced per scout §3.3 #5).
 function wireReducer(
   reducer: FeedReducer,
   engine: EngineHandle,
-  onCard?: (c: CardSpec) => void
+  onCard?: (c: CardSpec) => void,
+  onSnapshot?: (s: ReducerSnapshot) => void
 ): (env: EventEnvelope) => void {
   let scheduled = false;
   let queued: EventEnvelope[] = [];
@@ -154,7 +203,9 @@ function wireReducer(
       scheduled = false;
       const batch = queued; queued = [];
       for (const e of batch) for (const c of reducer.reduce(e)) { engine.mountCard(c); onCard?.(c); }
-      engine.pushBeat(reducer.snapshot());
+      const snap = reducer.snapshot();
+      engine.pushBeat(snap);
+      onSnapshot?.(snap);
     });
   };
 }
@@ -165,10 +216,10 @@ export interface FeedHandle { close: () => void; }
 export function startEventFeed(
   projectId: string,
   engine: EngineHandle,
-  opts: { roster?: ReducerRoster; onError?: (e: Error) => void; onConnect?: () => void } = {}
+  opts: { roster?: ReducerRoster; onError?: (e: Error) => void; onConnect?: () => void; onSnapshot?: (s: ReducerSnapshot) => void } = {}
 ): FeedHandle {
   const reducer = createReducer(opts.roster);
-  const handler: SSEEventHandler = wireReducer(reducer, engine);
+  const handler: SSEEventHandler = wireReducer(reducer, engine, undefined, opts.onSnapshot);
   const conn = createSSEConnection({ projectId, onEvent: handler, onError: opts.onError, onConnect: opts.onConnect });
   return { close: conn.close };
 }
@@ -180,10 +231,10 @@ export interface MockTimelineStep { delay: number; env: EventEnvelope; }
 
 export function startMockFeed(
   engine: EngineHandle,
-  opts: { roster?: ReducerRoster; speed?: number; onStep?: (env: EventEnvelope) => void } = {}
+  opts: { roster?: ReducerRoster; speed?: number; onStep?: (env: EventEnvelope) => void; onSnapshot?: (s: ReducerSnapshot) => void } = {}
 ): FeedHandle {
   const reducer = createReducer(opts.roster);
-  const handler = wireReducer(reducer, engine);
+  const handler = wireReducer(reducer, engine, undefined, opts.onSnapshot);
   const speed = opts.speed ?? 1;
   const timers: ReturnType<typeof setTimeout>[] = [];
   let stopped = false;   // the handle owns this; close() is the only thing that flips it

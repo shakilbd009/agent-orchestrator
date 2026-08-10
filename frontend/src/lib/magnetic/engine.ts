@@ -23,7 +23,7 @@
 
 import { AGENTS, EDGES } from './topology';
 import type { Agent, Beat, Hue } from './topology';
-import { cardHome } from './homes';
+import { cardHome, clusterCentroid, separateCentroids } from './homes';
 import type { Pt } from './homes';
 
 // physics constants (single tunable block) — verbatim from living-graph.ts
@@ -36,6 +36,12 @@ const BREATH_AMP = 3.6, BREATH_SPD = 0.0021;
 const BOUND_PAD = 70;
 const CW = 156, CH = 64;
 const SVGNS = 'http://www.w3.org/2000/svg';
+
+// Escape backend-fed text before interpolating into innerHTML (review F4:
+// `id`/`role`/`sub` can originate from the SSE `agentName`). Defense-in-depth.
+function esc(s: string): string {
+  return s.replace(/[&<>"']/g, (c) => c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : c === '"' ? '&quot;' : '&#39;');
+}
 
 export interface CardSpec {
   id: string;
@@ -53,12 +59,27 @@ export interface EngineHandle {
   destroy: () => void;
 }
 
+// What the page learns when a node/cluster is clicked (scout report §5: repurpose
+// the engine's hover/focus detail render to a CLICK that opens the existing
+// gate/approval drawer). `taskId` is resolved from the current beat's clusters.
+export interface NodeSelection {
+  agentId: string;
+  taskId: string | null;
+}
+
+export interface EngineOptions {
+  onSelect?: (sel: NodeSelection | null) => void;
+  // Page owns the static-map toggle; engine honors this initial reduced-motion
+  // state instead of auto-detecting prefers-reduced-motion.
+  initialReduced?: boolean;
+}
+
 const HUE_VAR: Record<Hue, string> = {
   user: '--h-user', intake: '--h-intake', architect: '--h-architect', builder: '--h-builder',
   security: '--h-security', qa: '--h-qa', devops: '--h-devops', human: '--h-human', prod: '--h-prod',
 };
 
-export function initLivingGraph(root: HTMLElement): EngineHandle {
+export function initLivingGraph(root: HTMLElement, opts: EngineOptions = {}): EngineHandle {
   const svgEl = root.querySelector<SVGSVGElement>('svg.map');
   const detail = root.querySelector<HTMLElement>('[data-detail]');
   const capEl = root.querySelector<HTMLElement>('[data-caption]');
@@ -101,11 +122,11 @@ export function initLivingGraph(root: HTMLElement): EngineHandle {
   const cards: Record<string, Pt & { vx: number; vy: number; agent: string; ox: number; oy: number; hx: number; hy: number }> = {};
 
   // mutable beat source (replaces BEATS[cur]) + accumulating maps
-  let currentBeat: Beat = { active: [], lit: [], rework: [], add: [], win: 'closed' };
+  let currentBeat: Beat = { active: [], clusters: [], lit: [], rework: [], add: [], win: 'closed' };
   const seen = new Set<string>();        // cards ever materialized (persist as knowledge map)
   const litEver = new Set<string>();     // edges ever lit (faded-but-present)
   const perAgentCards: Record<string, number> = {};
-  let hoverLock: string | null = null;
+  let clickLock: string | null = null;   // selected node (click → gate drawer)
   let playing = true;
   let reduced = false;
   let raf = 0;
@@ -121,6 +142,22 @@ export function initLivingGraph(root: HTMLElement): EngineHandle {
     const active = new Set(beat.active || []);
     const litSet = new Set<string>([...(beat.lit || []), ...(beat.rework || [])]);
     const springSet = [...litSet];
+    // Per-task centroids (scout §4.2): each active task is its own cluster
+    // center, so concurrent tasks form SEPARATE temporary clusters instead of
+    // one merged blob. An agent active in N tasks is pulled toward each task's
+    // centroid (sum of forces). Agents in the union but no named cluster fall
+    // back to the global centroid. `separateCentroids` (review M1) breaks exact
+    // coincidences (e.g. the 2×2 Layer-B diagonal) so complementary splits
+    // don't collapse to one focal point.
+    const clusters = beat.clusters || [];
+    const taskCenRaw: Record<string, Pt> = {};
+    for (const c of clusters) {
+      const cen = clusterCentroid(c, rest);
+      if (cen) taskCenRaw[c.taskId] = cen;
+    }
+    const taskCen = separateCentroids(taskCenRaw);
+    const agentTasks: Record<string, string[]> = {};
+    for (const c of clusters) for (const a of c.agents) if (taskCen[c.taskId]) (agentTasks[a] ||= []).push(c.taskId);
     const cen = centroid(beat.active || []);
     const breath = Math.sin(now * BREATH_SPD) * BREATH_AMP;
     const ids = Object.keys(nodes);
@@ -131,7 +168,12 @@ export function initLivingGraph(root: HTMLElement): EngineHandle {
       const hx = h.x + dirx / dl * breath, hy = h.y + diry / dl * breath;
       const rk = active.has(id) ? REST_KA : REST_RK;
       n.fx += (hx - n.x) * rk; n.fy += (hy - n.y) * rk;
-      if (active.has(id)) { n.fx += (cen.x - n.x) * FOCAL_K; n.fy += (cen.y - n.y) * FOCAL_K; }
+      if (active.has(id)) {
+        const tasks = agentTasks[id];
+        if (tasks?.length) {
+          for (const t of tasks) { const tc = taskCen[t]; n.fx += (tc.x - n.x) * FOCAL_K; n.fy += (tc.y - n.y) * FOCAL_K; }
+        } else { n.fx += (cen.x - n.x) * FOCAL_K; n.fy += (cen.y - n.y) * FOCAL_K; }
+      }
     }
     for (let i = 0; i < ids.length; i++) {
       for (let j = i + 1; j < ids.length; j++) {
@@ -205,7 +247,7 @@ export function initLivingGraph(root: HTMLElement): EngineHandle {
   // ---- detail panel (adapted from living-graph.ts renderDetail) ----
   function renderDetail(active: string[]) {
     if (!detail) return;
-    if (hoverLock) active = [hoverLock];
+    if (clickLock) active = [clickLock];
     const show = active.length > 3 ? [] : active;
     if (!show.length) {
       detail.classList.add('empty');
@@ -222,8 +264,8 @@ export function initLivingGraph(root: HTMLElement): EngineHandle {
       const state = (currentBeat.win === 'open' && id === 'captain') ? 'open'
         : (currentBeat.active || []).includes(id) ? 'active' : 'idle';
       const roleVar = getComputedStyle(node!).getPropertyValue('--role') || `var(${HUE_VAR[AGENTS[id]?.hue || 'user']})`;
-      return `<div class="who" style="--role:${roleVar}"><span class="name">${role}</span><span class="role-sub">${sub}</span></div>
-        <div class="body"><span class="obj">${instr}</span><div class="chips">${tools.map((t) => `<span class="chip">${t}</span>`).join('')}<span class="chip state">${state}</span></div></div>`;
+      return `<div class="who" style="--role:${esc(roleVar)}"><span class="name">${esc(role)}</span><span class="role-sub">${esc(sub)}</span></div>
+        <div class="body"><span class="obj">${esc(instr)}</span><div class="chips">${tools.map((t) => `<span class="chip">${esc(t)}</span>`).join('')}<span class="chip state">${esc(state)}</span></div></div>`;
     }).join('');
   }
 
@@ -256,7 +298,7 @@ export function initLivingGraph(root: HTMLElement): EngineHandle {
   function renderCaption(b: Beat) {
     if (capEl) {
       const n = (b.active || []).length;
-      const names = (b.active || []).slice(0, 4).map((id) => AGENTS[id]?.role || id).join(' · ');
+      const names = (b.active || []).slice(0, 4).map((id) => esc(AGENTS[id]?.role || id)).join(' · ');
       const kicker = n === 0 ? 'Settled' : n === 1 ? 'One active' : `${n} active`;
       const body = n === 0
         ? 'No active work; agents rest at home. Cards persist as a knowledge map.'
@@ -307,13 +349,14 @@ export function initLivingGraph(root: HTMLElement): EngineHandle {
   function pushBeat(b: Partial<Beat>) {
     currentBeat = {
       active: b.active ?? currentBeat.active,
+      clusters: b.clusters ?? currentBeat.clusters,
       lit: b.lit ?? currentBeat.lit,
       rework: b.rework ?? currentBeat.rework,
       add: b.add ?? currentBeat.add,
       win: b.win ?? currentBeat.win,
     };
     applyBeatClasses(currentBeat);
-    if (!hoverLock) renderDetail(currentBeat.active || []);
+    if (!clickLock) renderDetail(currentBeat.active || []);
     renderCaption(currentBeat);
     if (reduced) renderStatic();
   }
@@ -341,6 +384,22 @@ export function initLivingGraph(root: HTMLElement): EngineHandle {
     if (playBtn) playBtn.textContent = on ? 'Play' : 'Pause';
   }
 
+  // ---- selection: click a node/cluster → open the gate/approval drawer ----
+  // (scout §5: repurpose the engine's hover/focus renderDetail to a CLICK that
+  // opens the EXISTING gate/approval UI. `taskId` is resolved from the current
+  // beat's per-task clusters so a click on an agent in an active cluster targets
+  // that task's gates.)
+  function findTaskForAgent(agent: string): string | null {
+    for (const c of currentBeat.clusters || []) if (c.agents.includes(agent)) return c.taskId;
+    return null;
+  }
+  function selectNode(id: string | null) {
+    clickLock = id;
+    for (const k in nodeEls) nodeEls[k].classList.toggle('sel', k === id);
+    renderDetail(id ? [id] : (currentBeat.active || []));
+    opts.onSelect?.(id ? { agentId: id, taskId: findTaskForAgent(id) } : null);
+  }
+
   // ---- controls (optional elements; guarded so a minimal scaffold still runs) ----
   playBtn?.addEventListener('click', () => {
     if (reduced) return;
@@ -351,11 +410,16 @@ export function initLivingGraph(root: HTMLElement): EngineHandle {
   rmToggle?.addEventListener('change', (e) => setReducedMotion((e.target as HTMLInputElement).checked));
   root.querySelectorAll<HTMLElement>('[data-node]').forEach((n) => {
     const id = n.getAttribute('data-node')!;
-    n.addEventListener('mouseenter', () => { hoverLock = id; renderDetail(currentBeat.active || []); });
-    n.addEventListener('mouseleave', () => { hoverLock = null; renderDetail(currentBeat.active || []); });
-    n.addEventListener('focus', () => { hoverLock = id; renderDetail(currentBeat.active || []); });
-    n.addEventListener('blur', () => { hoverLock = null; renderDetail(currentBeat.active || []); });
+    n.setAttribute('tabindex', '0');
+    n.setAttribute('role', 'button');
+    n.setAttribute('aria-label', `${AGENTS[id]?.role ?? id}: click to open gates`);
+    n.addEventListener('click', (e) => { e.stopPropagation(); selectNode(id); });
+    n.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); selectNode(id); }
+    });
   });
+  // click the empty canvas → clear selection
+  svg?.addEventListener('click', (e) => { if (e.target === svg) selectNode(null); });
 
   const onVis = () => {
     if (document.hidden) { if (raf) { cancelAnimationFrame(raf); raf = 0; } }
@@ -368,8 +432,10 @@ export function initLivingGraph(root: HTMLElement): EngineHandle {
     document.removeEventListener('visibilitychange', onVis);
   }
 
-  // reduced-motion by OS preference; else start the live loop immediately
-  if (matchMedia('(prefers-reduced-motion: reduce)').matches) {
+  // reduced-motion: page-supplied initial state wins (it owns the static-map
+  // toggle), else fall back to the OS prefers-reduced-motion preference.
+  const startReduced = opts.initialReduced ?? matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (startReduced) {
     setReducedMotion(true);
     if (rmToggle) rmToggle.checked = true;
   } else {

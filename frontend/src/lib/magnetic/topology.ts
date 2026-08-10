@@ -41,11 +41,21 @@ export interface Edge {
   kind: EdgeKind;
 }
 
+// One active task's cluster membership (scout report §4.2): each active task
+// gets its OWN centroid, so concurrent tasks form separate temporary clusters
+// instead of collapsing into one merged blob. The engine computes a focal
+// centroid per cluster; `active` stays the union for edge/caption logic.
+export interface Cluster {
+  taskId: string;
+  agents: string[];
+}
+
 // Per-beat delta pushed by the live feed. `t`/`stage`/`cap`/`win` from canon's
-// Beat are optional here (the feed supplies active/lit/rework/add; the engine
-// derives caption/state from the active set). Reference: canon.ts Beat.
+// Beat are optional here (the feed supplies active/lit/rework/add/clusters; the
+// engine derives caption/state from the active set). Reference: canon.ts Beat.
 export interface Beat {
   active: string[];
+  clusters?: Cluster[];      // per-task groupings → per-task centroids
   lit?: string[];
   rework?: string[];
   add?: string[];            // card ids materializing this beat (accumulate)
