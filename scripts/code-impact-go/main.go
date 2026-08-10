@@ -25,8 +25,9 @@ import (
 )
 
 // spec §1 color convention — MUST match architecture-impact baseline.
-//   green=addition, amber=modification, red=removal, gray=existing context,
-//   dashed=unexpected (overflow / unresolved target).
+//
+//	green=addition, amber=modification, red=removal, gray=existing context,
+//	dashed=unexpected (overflow / unresolved target).
 const (
 	classAdd = "add" // green
 	classMod = "mod" // amber
@@ -42,7 +43,7 @@ func main() {
 		baseRef  = envOr("BASE_REF", "origin/main")
 		headRef  = envOr("HEAD_REF", "HEAD")
 		tsScript = envOr("CODE_IMPACT_TS", "") // optional override; default resolved next to this binary
-		view     = envOr("VIEW", "auto")        // §5.1: roots|blast|auto
+		view     = envOr("VIEW", "auto")       // §5.1: roots|blast|auto
 		showHelp bool
 	)
 	flag.StringVar(&baseRef, "base", baseRef, "BASE_REF (default origin/main)")
@@ -96,15 +97,6 @@ func run(baseRef, headRef, tsScript, viewReq string) error {
 	for _, f := range goFiles {
 		ga.analyzeFile(f)
 	}
-	if len(ga.testFiles) > 0 {
-		files := make([]string, 0, len(ga.testFiles))
-		for f := range ga.testFiles {
-			files = append(files, f)
-		}
-		sort.Strings(files)
-		graph.notes = append(graph.notes, fmt.Sprintf("%d test file(s) changed (%s) — test functions are not graph nodes; affected production symbols appear in the test-impact table.", len(files), strings.Join(files, ", ")))
-	}
-
 	// Frontend slice (§2.2): delegate to the Node script, parse its JSON.
 	if len(tsFiles) > 0 {
 		tsNodes, tsEdges, tsRoutes, tsImports, note, err := runTSScript(tsScript, baseRef, headRef, tsFiles)
@@ -135,31 +127,29 @@ func run(baseRef, headRef, tsScript, viewReq string) error {
 	} else {
 		out = graph.render(defaultCap)
 	}
-	// spec §3.2 idempotent splice fence — worker-embeddable.
+	// spec §3.2 idempotent splice fence — worker-embeddable. stdout is ONLY the
+	// fenced block (Mermaid diagram + one-line legend); capping/skip warnings go
+	// to stderr so they never pollute the embeddable PR-description block.
 	fmt.Println("<!--code-impact:start-->")
 	fmt.Print(out)
-	if len(graph.notes) > 0 {
-		fmt.Println()
-		fmt.Println("> **Notes:**")
-		for _, n := range graph.notes {
-			fmt.Printf("> - %s\n", n)
-		}
-	}
 	fmt.Println("<!--code-impact:end-->")
+	for _, n := range graph.notes {
+		fmt.Fprintf(os.Stderr, "code-impact-go: %s\n", n)
+	}
 	return nil
 }
 
 // ---------------- graph model ----------------
 
 type node struct {
-	key    string
-	label  string // human name (receiver-qualified for methods / file for ts)
-	file   string
-	start  int // line, 0 if unknown
-	lang   string
-	change string // add|mod|rem|ctx
+	key     string
+	label   string // human name (receiver-qualified for methods / file for ts)
+	file    string
+	start   int // line, 0 if unknown
+	lang    string
+	change  string // add|mod|rem|ctx
 	exports []string
-	isTest bool // test func/file — shown in table, excluded from graph nodes
+	isTest  bool // test func/file — shown in table, excluded from graph nodes
 }
 
 type edge struct {
@@ -189,12 +179,12 @@ type importTarget struct {
 }
 
 type graph struct {
-	nodes map[string]*node
-	order []string // insertion order for stable output
-	edges []edge
-	notes []string
-	routes        []routeCtx  // frontend route context (roots view)
-	imports       []importCtx // frontend import-target context (roots view)
+	nodes        map[string]*node
+	order        []string // insertion order for stable output
+	edges        []edge
+	notes        []string
+	routes       []routeCtx     // frontend route context (roots view)
+	imports      []importCtx    // frontend import-target context (roots view)
 	callOverflow map[string]int // per-source overflow count for the "… +N more" summary
 }
 
@@ -221,32 +211,27 @@ func (g *graph) hasNode(k string) bool { _, ok := g.nodes[k]; return ok }
 // ---------------- backend (Go) static analysis (§2.1 Approach A) ----------------
 
 type funcInfo struct {
-	canon    string // (*TaskService).ActivateTask  or  ConfigureHarness
-	plain    string // ActivateTask / ConfigureHarness
-	recv     string // TaskService / ""
-	file     string // file the func lives in (set for dependents)
-	start    int
-	end      int
-	callees  []string // deduped callee plain-names from *ast.CallExpr in body
+	canon   string // (*TaskService).ActivateTask  or  ConfigureHarness
+	plain   string // ActivateTask / ConfigureHarness
+	recv    string // TaskService / ""
+	file    string // file the func lives in (set for dependents)
+	start   int
+	end     int
+	callees []string // deduped callee plain-names from *ast.CallExpr in body
 }
 
 type goAnalyzer struct {
 	base, head string
 	g          *graph
 	// parsed: ref -> file -> canon -> info (cache)
-	parsed     map[string]map[string]map[string]*funcInfo
-	testFiles  map[string]bool // changed _test.go files (for the summary note)
+	parsed map[string]map[string]map[string]*funcInfo
 }
 
 func (a *goAnalyzer) analyzeFile(file string) {
-	if a.testFiles == nil {
-		a.testFiles = map[string]bool{}
-	}
 	// ponytail: test files are coverage, not blast radius. Their functions are
-	// not graph nodes (they would drown the cap); they surface as a summary note
-	// and as "Tests likely impacted" dependents of changed production symbols.
+	// not graph nodes (they would drown the cap); test dependents stay tracked
+	// (isTest) but are excluded from the diagram.
 	if isTestFile(file) {
-		a.testFiles[file] = true
 		return
 	}
 	baseFuncs := a.funcs(a.base, file)
@@ -512,9 +497,9 @@ type tsEdgeJSON struct {
 	Kind  string `json:"kind"`
 }
 type tsRouteJSON struct {
-	File        string   `json:"file"`
-	ParentLayout string  `json:"parentLayout"`
-	Siblings    []string `json:"siblings"`
+	File         string   `json:"file"`
+	ParentLayout string   `json:"parentLayout"`
+	Siblings     []string `json:"siblings"`
 }
 type tsImportTargetJSON struct {
 	File    string   `json:"file"`
@@ -525,11 +510,11 @@ type tsImportJSON struct {
 	Targets []tsImportTargetJSON `json:"targets"`
 }
 type tsOut struct {
-	Nodes   []tsNodeJSON  `json:"nodes"`
-	Edges   []tsEdgeJSON  `json:"edges"`
-	Routes  []tsRouteJSON `json:"routes"`
+	Nodes   []tsNodeJSON   `json:"nodes"`
+	Edges   []tsEdgeJSON   `json:"edges"`
+	Routes  []tsRouteJSON  `json:"routes"`
 	Imports []tsImportJSON `json:"imports"`
-	Note    string        `json:"note"`
+	Note    string         `json:"note"`
 }
 
 func runTSScript(override, base, head string, files []string) (nodes []*node, edges []edge, routes []routeCtx, imports []importCtx, note string, err error) {
@@ -587,18 +572,17 @@ func runTSScript(override, base, head string, files []string) (nodes []*node, ed
 // ---------------- rendering (capped neighborhood, spec §2 + §1 colors) ----------------
 
 func (g *graph) render(cap int) string {
-	// Production neighborhood only: test nodes are table-only (spec §2 cap).
+	// Production neighborhood only: test nodes are excluded (spec §2 cap).
 	changed, dependents, callees := g.partition()
 
 	included := map[string]bool{}
-	var notes []string
 
 	if len(changed) > cap {
-		// truncate even changed nodes when a PR is very large; table stays complete.
+		// truncate even changed nodes when a PR is very large; warn on stderr.
 		for _, k := range changed[:cap] {
 			included[k] = true
 		}
-		notes = append(notes, fmt.Sprintf("graph capped at %d changed symbols; %d more changed symbols not drawn (see test-impact table).", cap, len(changed)-cap))
+		g.notes = append(g.notes, fmt.Sprintf("graph capped at %d changed symbols; %d more changed symbols not drawn.", cap, len(changed)-cap))
 	} else {
 		for _, k := range changed {
 			included[k] = true
@@ -679,13 +663,8 @@ func (g *graph) render(cap int) string {
 		b.WriteString(fmt.Sprintf("  %s -.-> %s;\n", idOf[src], ov))
 	}
 	b.WriteString("```\n\n")
-
-	b.WriteString(g.testImpactTable())
-	if len(notes) > 0 {
-		for _, nt := range notes {
-			b.WriteString("_" + nt + "_\n")
-		}
-	}
+	// one-line markdown legend — the sole non-diagram line in the block.
+	b.WriteString("🟩 green = PR addition (new growth) · 🟨 amber = PR modification (graft point) · 🟥 red = removal · ⬜ gray = existing code\n")
 	return b.String()
 }
 
@@ -727,55 +706,6 @@ func (g *graph) partition() (changed, deps, calls []string) {
 	return
 }
 
-func (g *graph) testImpactTable() string {
-	type row struct {
-		sym, lang, delta, loc, callees, deps, tests string
-	}
-	var rows []row
-	for _, k := range g.order {
-		n := g.nodes[k]
-		// table lists every changed production symbol (test funcs are notes, not rows).
-		if n.isTest || n.change == classCtx || n.change == "" {
-			continue
-		}
-		var callees, deps, tests []string
-		for _, e := range g.edges {
-			if e.kind == "calls" && e.from == k && g.nodes[e.to] != nil {
-				callees = append(callees, g.nodes[e.to].label)
-			}
-			if (e.kind == "called-by" || e.kind == "imports") && e.to == k && g.nodes[e.from] != nil {
-				d := g.nodes[e.from]
-				deps = append(deps, d.label)
-				if d.isTest || isTestFile(d.file) {
-					tests = append(tests, d.file)
-				}
-			}
-		}
-		loc := n.file
-		if n.start != 0 {
-			loc = fmt.Sprintf("%s:%d", n.file, n.start)
-		}
-		delta := map[string]string{classAdd: "+", classMod: "~", classRem: "-"}[n.change]
-		rows = append(rows, row{
-			sym: n.label, lang: n.lang, delta: delta, loc: loc,
-			callees: joinTrunc(callees, 4), deps: joinTrunc(deps, 4), tests: joinTrunc(tests, 4),
-		})
-	}
-	if len(rows) == 0 {
-		return "_No changed functions/modules detected in this diff._\n"
-	}
-	var b strings.Builder
-	b.WriteString("### Test impact\n\n")
-	b.WriteString("| Symbol | Lang | Δ | Location | 1-hop callees | Direct dependents | Tests likely impacted |\n")
-	b.WriteString("|---|---|---|---|---|---|---|\n")
-	for _, r := range rows {
-		b.WriteString(fmt.Sprintf("| %s | %s | %s | %s | %s | %s | %s |\n",
-			esc(r.sym), r.lang, r.delta, esc(r.loc), esc(r.callees), esc(r.deps), esc(r.tests)))
-	}
-	b.WriteString("\n")
-	return b.String()
-}
-
 // ---------------- root-system view (prototype §5) ----------------
 //
 // renderRoots is the additive-PR view: a rooted flowchart TD that surfaces the
@@ -790,7 +720,8 @@ func (g *graph) renderRoots(cap int) string {
 	g.surfaceRootsContext()
 
 	changed, ctx := g.partitionRoots()
-	included, notes := g.capRoots(changed, ctx, cap)
+	included, capNotes := g.capRoots(changed, ctx, cap)
+	g.notes = append(g.notes, capNotes...)
 
 	// declaration order: spine (shells+layouts) → changed growth → gray context.
 	var spine, sibCtx, tgtCtx, otherCtx, declOrder []string
@@ -858,22 +789,9 @@ func (g *graph) renderRoots(cap int) string {
 		b.WriteString(fmt.Sprintf("  %s --> %s;\n", idOf[e.from], idOf[e.to]))
 	}
 
-	// §5.2.4 legend subgraph — four fixed swatches, one per classDef.
-	b.WriteString("  subgraph Legend[\"Legend — root-system colors\"]\n")
-	b.WriteString("    direction LR\n")
-	b.WriteString("    lgAdd[\"new growth (PR addition)\"]:::add;\n")
-	b.WriteString("    lgMod[\"graft point (PR modification)\"]:::mod;\n")
-	b.WriteString("    lgRem[\"removed\"]:::rem;\n")
-	b.WriteString("    lgCtx[\"established root (existing code)\"]:::ctx;\n")
-	b.WriteString("  end\n")
 	b.WriteString("```\n\n")
-	// §5.2.4 Markdown legend fallback (belt-and-suspenders).
-	b.WriteString("_🟩 green = PR addition (new growth) · 🟨 amber = PR modification (graft point) · 🟥 red = removal · ⬜ gray = existing code (established root)._\n\n")
-
-	b.WriteString(g.testImpactTable())
-	for _, nt := range notes {
-		b.WriteString("_" + nt + "_\n")
-	}
+	// §5.2.4 one-line markdown legend — the sole non-diagram line in the block.
+	b.WriteString("🟩 green = PR addition (new growth) · 🟨 amber = PR modification (graft point) · 🟥 red = removal · ⬜ gray = existing code\n")
 	return b.String()
 }
 
@@ -991,7 +909,7 @@ func (g *graph) capRoots(changed, ctx []string, cap int) (map[string]bool, []str
 	}
 	var notes []string
 	if len(changed) > changedShown {
-		notes = append(notes, fmt.Sprintf("graph capped at %d nodes; %d more changed symbols not drawn (see test-impact table).", cap, len(changed)-changedShown))
+		notes = append(notes, fmt.Sprintf("graph capped at %d nodes; %d more changed symbols not drawn.", cap, len(changed)-changedShown))
 	}
 	return included, notes
 }
@@ -1171,22 +1089,6 @@ func isTestFile(f string) bool {
 	return strings.HasSuffix(f, "_test.go") ||
 		strings.HasSuffix(f, ".test.ts") ||
 		strings.HasSuffix(f, ".spec.ts")
-}
-
-func joinTrunc(ss []string, n int) string {
-	if len(ss) == 0 {
-		return "—"
-	}
-	sort.Strings(ss)
-	if len(ss) > n {
-		return strings.Join(ss[:n], ", ") + fmt.Sprintf(", … +%d more", len(ss)-n)
-	}
-	return strings.Join(ss, ", ")
-}
-
-func esc(s string) string {
-	s = strings.ReplaceAll(s, "|", "\\|")
-	return s
 }
 
 func methodTail(canon string) string {
