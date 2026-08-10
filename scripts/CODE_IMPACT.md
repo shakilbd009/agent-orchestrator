@@ -1,8 +1,8 @@
 # code-impact — per-PR fine-grained blast-radius tool
 
 Per-PR, **function/module-granularity** impact visualization. Emits a Mermaid
-blast-radius graph + test-impact table to stdout, wrapped in an idempotent splice
-fence for PR-body embedding. Complements the coarse `ARCHITECTURE.md` +
+blast-radius diagram plus a one-line color legend to stdout, wrapped in an
+idempotent splice fence for PR-body embedding. Complements the coarse `ARCHITECTURE.md` +
 architecture-impact baseline (this is the fine layer; do not duplicate the coarse
 component graph).
 
@@ -54,8 +54,9 @@ dashed=unexpected (overflow / unresolved callee). Applied via Mermaid
 
 25-node budget: changed production symbols → direct dependents → callees.
 Overflow callees summarized as `… +N more`. Test functions are **not** graph
-nodes (they'd drown the cap); they surface in the test-impact table's
-"Tests likely impacted" column.
+nodes (they'd drown the cap). When a large PR truncates the graph, the capping
+warning prints to **stderr** — the embeddable stdout block stays just the
+diagram + legend.
 
 ## Views: `--view roots|blast|auto` (prototype §5)
 
@@ -77,7 +78,8 @@ untouched.
   `--view`.
 
 The roots block replaces the blast block inside the same idempotent
-`<!--code-impact-->` fence; the test-impact table stays beneath, unchanged.
+`<!--code-impact-->` fence. Both views emit **only** the Mermaid diagram plus a
+one-line color legend — no in-diagram legend subgraph, no test-impact table.
 Both views reuse the spec §1 color convention (green=add, amber=mod, red=rem,
 gray=ctx). Zero new dependencies (prototype §5.3).
 

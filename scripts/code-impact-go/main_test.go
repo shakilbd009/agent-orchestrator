@@ -6,6 +6,7 @@ import (
 	"go/parser"
 	"go/token"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -35,10 +36,10 @@ func TestParseHunks(t *testing.T) {
 
 func TestIntersects(t *testing.T) {
 	cases := []struct {
-		name        string
-		start, end  int
-		hunks       []hunk
-		want        bool
+		name       string
+		start, end int
+		hunks      []hunk
+		want       bool
 	}{
 		{"no overlap", 10, 20, []hunk{{1, 5}}, false},
 		{"overlap", 10, 20, []hunk{{15, 25}}, true},
@@ -194,6 +195,40 @@ func TestCapRootsReservesCtx(t *testing.T) {
 	}
 	if total > defaultCap {
 		t.Fatalf("total included = %d, want <= cap %d", total, defaultCap)
+	}
+}
+
+// The fenced block is now ONLY the Mermaid diagram + the one-line markdown
+// legend: no in-diagram Legend subgraph, no test-impact table. These lock that
+// simplification against regression (PR #17 review feedback).
+func TestRenderRootsOutputIsDiagramPlusLegend(t *testing.T) {
+	g := newGraph()
+	g.addNode(&node{key: "ts::p", label: "p", file: "frontend/src/routes/x/+page.svelte", lang: "svelte", change: classAdd})
+	g.routes = []routeCtx{{File: "frontend/src/routes/x/+page.svelte", ParentLayout: "frontend/src/routes/x/+layout.svelte"}}
+	out := g.renderRoots(defaultCap)
+	if !strings.Contains(out, "🟩 green = PR addition (new growth)") {
+		t.Fatal("missing one-line markdown legend beneath the diagram")
+	}
+	if strings.Contains(out, "subgraph Legend") {
+		t.Fatal("in-diagram Legend subgraph should be removed (noise)")
+	}
+	if strings.Contains(out, "Test impact") || strings.Contains(out, "| Symbol") {
+		t.Fatal("test-impact table should be removed")
+	}
+	if strings.Contains(out, "established root") {
+		t.Fatal("stale legend wording ('established root') should be gone")
+	}
+}
+
+func TestRenderBlastOutputIsDiagramPlusLegend(t *testing.T) {
+	g := newGraph()
+	g.addNode(&node{key: "go::A::f.go", label: "A", file: "f.go", lang: "go", change: classMod})
+	out := g.render(defaultCap)
+	if !strings.Contains(out, "🟩 green = PR addition (new growth)") {
+		t.Fatal("missing one-line markdown legend beneath the diagram")
+	}
+	if strings.Contains(out, "Test impact") || strings.Contains(out, "| Symbol") {
+		t.Fatal("test-impact table should be removed")
 	}
 }
 

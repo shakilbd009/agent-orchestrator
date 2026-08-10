@@ -2,7 +2,7 @@
 # scripts/code-impact — dispatcher for the per-PR code-impact tool (spec §2).
 # Resolves BASE_REF/HEAD_REF, builds the Go core with the repo's pinned Go
 # (1.25.6, no separate toolchain), and emits a spliceable Markdown block
-# (Mermaid blast-radius + test-impact table) wrapped in the §3.2 idempotent
+# (Mermaid blast-radius diagram + one-line legend) wrapped in the §3.2 idempotent
 # fence to stdout.
 #
 # Usage:
